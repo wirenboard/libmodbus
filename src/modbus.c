@@ -344,6 +344,7 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
     struct timeval *p_tv;
     int length_to_read;
     int msg_length = 0;
+    int receiving_noise = 1;
     _step_t step;
 
     if (ctx->debug) {
@@ -380,6 +381,66 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
         tv.tv_sec = ctx->response_timeout.tv_sec;
         tv.tv_usec = ctx->response_timeout.tv_usec;
         p_tv = &tv;
+    }
+
+    // skip noise zeros before message
+    while (receiving_noise > 0) {
+        rc = ctx->backend->select(ctx, &rset, p_tv, 1);
+        if (rc == -1) {
+            _error_print(ctx, "select");
+            if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) {
+                int saved_errno = errno;
+
+                if (errno == ETIMEDOUT) {
+                    _sleep_response_timeout(ctx);
+                    modbus_flush(ctx);
+                } else if (errno == EBADF) {
+                    modbus_close(ctx);
+                    modbus_connect(ctx);
+                }
+                errno = saved_errno;
+            }
+            return -1;
+        }
+
+        uint8_t tmp_data;
+        rc = ctx->backend->recv(ctx, &tmp_data, 1);
+        if (rc == 0) {
+            errno = ECONNRESET;
+            rc = -1;
+        }
+
+        if (rc == -1) {
+            _error_print(ctx, "read");
+            if ((ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) &&
+                (errno == ECONNRESET || errno == ECONNREFUSED ||
+                 errno == EBADF)) {
+                int saved_errno = errno;
+                modbus_close(ctx);
+                modbus_connect(ctx);
+                /* Could be removed by previous calls */
+                errno = saved_errno;
+            }
+            return -1;
+        }
+
+        if (ctx->debug) {
+            printf("[noise skip] read: %.2X\n", tmp_data);
+        }
+
+        if (tmp_data != 0x00) {
+            msg[msg_length] = tmp_data;
+            msg_length++;
+            length_to_read--;
+            receiving_noise = 0;
+            if (ctx->debug) {
+                printf("<%.2X>", tmp_data);
+            }
+        } else {
+            if (ctx->debug) {
+                printf("Received a zero byte before response, skipping it on purpose\n");
+            }
+        }
     }
 
     while (length_to_read != 0) {
