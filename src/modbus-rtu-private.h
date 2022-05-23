@@ -51,6 +51,8 @@ typedef struct _modbus_rtu {
     uint8_t data_bit;
     /* Stop bit */
     uint8_t stop_bit;
+    /* Separate stopbit settings for receiving */
+    uint8_t stop_bit_receive;
     /* Parity: 'N', 'O', 'E' */
     char parity;
 #if defined(_WIN32)
