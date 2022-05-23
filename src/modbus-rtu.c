@@ -406,9 +406,9 @@ static int _modbus_rtu_connect(modbus_t *ctx)
     modbus_rtu_t *ctx_rtu = ctx->backend_data;
 
     if (ctx->debug) {
-        printf("Opening %s at %d bauds (%c, %d, %d)\n",
+        printf("Opening %s at %d bauds (%c, %d, %d, %d)\n",
                ctx_rtu->device, ctx_rtu->baud, ctx_rtu->parity,
-               ctx_rtu->data_bit, ctx_rtu->stop_bit);
+               ctx_rtu->data_bit, ctx_rtu->stop_bit, ctx_rtu->stop_bit_receive);
     }
 
 #if defined(_WIN32)
@@ -1276,6 +1276,7 @@ modbus_t* modbus_new_rtu(const char *device,
     }
     ctx_rtu->data_bit = data_bit;
     ctx_rtu->stop_bit = stop_bit;
+    ctx_rtu->stop_bit_receive = stop_bit;  // default is equal to sb-to-send
 
 #if HAVE_DECL_TIOCSRS485
     /* The RS232 mode has been set by default */
@@ -1299,4 +1300,23 @@ modbus_t* modbus_new_rtu(const char *device,
     ctx_rtu->confirmation_to_ignore = FALSE;
 
     return ctx;
+}
+
+modbus_t* modbus_new_rtu_different_stopbits(const char *device,
+                         int baud, char parity, int data_bit,
+                         int stop_bit, int stop_bit_receive)
+{
+    modbus_t *ctx = modbus_new_rtu(device, baud, parity, data_bit, stop_bit);
+# if defined(_WIN32)
+    if (ctx->debug) {
+        fprintf(stderr, "This function isn't supported on your platform\n");
+    }
+    errno = ENOTSUP;
+    return -1;
+# else
+    modbus_rtu_t *ctx_rtu;
+    ctx_rtu = (modbus_rtu_t *)ctx->backend_data;
+    ctx_rtu->stop_bit_receive = stop_bit_receive;
+    return ctx;
+#endif
 }
