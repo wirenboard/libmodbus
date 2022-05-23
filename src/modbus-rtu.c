@@ -393,6 +393,44 @@ static int _modbus_rtu_check_integrity(modbus_t *ctx, uint8_t *msg,
     }
 }
 
+
+/* Sets up stopbits for RTU-communications serial device */
+static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
+{
+#if defined(_WIN32)
+    if (ctx->debug) {
+        fprintf(stderr, "This function isn't supported on your platform\n");
+    }
+    errno = ENOTSUP;
+    return -1;
+#else
+    struct termios tios;
+
+    /* Check is fd still valid */
+    if (fcntl(ctx->s, F_GETFL) == -1) {
+        if (ctx->debug) {
+            fprintf(stderr, "ERROR: Port is not open (%s)\n", strerror(errno));
+        }
+        return -1;
+    }
+
+    tcgetattr(ctx->s, &tios);
+    /* Stop bit (1 or 2) */
+    if (stop_bit == 1)
+        tios.c_cflag &=~ CSTOPB;
+    else /* 2 */
+        tios.c_cflag |= CSTOPB;
+
+    /* Applying settings after all queued output has been written */
+    if (tcsetattr(ctx->s, TCSADRAIN, &tios) < 0) {
+        close(ctx->s);
+        ctx->s = -1;
+        return -1;
+    }
+    return 0;
+#endif
+}
+
 /* Sets up a serial port for RTU communications */
 static int _modbus_rtu_connect(modbus_t *ctx)
 {
@@ -750,12 +788,6 @@ static int _modbus_rtu_connect(modbus_t *ctx)
         break;
     }
 
-    /* Stop bit (1 or 2) */
-    if (ctx_rtu->stop_bit == 1)
-        tios.c_cflag &=~ CSTOPB;
-    else /* 2 */
-        tios.c_cflag |= CSTOPB;
-
     /* PARENB       Enable parity bit
        PARODD       Use odd parity instead of even */
     if (ctx_rtu->parity == 'N') {
@@ -894,6 +926,10 @@ static int _modbus_rtu_connect(modbus_t *ctx)
     if (tcsetattr(ctx->s, TCSANOW, &tios) < 0) {
         close(ctx->s);
         ctx->s = -1;
+        return -1;
+    }
+
+    if (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit) != 0) {
         return -1;
     }
 #endif
