@@ -267,15 +267,60 @@ static void _modbus_rtu_ioctl_rts(modbus_t *ctx, int on)
 }
 #endif
 
-static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_length)
+/* Sets up stopbits for RTU-communications serial device */
+static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
 {
 #if defined(_WIN32)
-    modbus_rtu_t *ctx_rtu = ctx->backend_data;
+    if (ctx->debug) {
+        fprintf(stderr, "This function isn't supported on your platform\n");
+    }
+    errno = ENOTSUP;
+    return -1;
+#else
+    struct termios tios;
+
+    /* Check is fd still valid */
+    if (fcntl(ctx->s, F_GETFL) == -1) {
+        if (ctx->debug) {
+            fprintf(stderr, "ERROR: Port fd is not valid (%s)\n", strerror(errno));
+        }
+        return -1;
+    }
+
+    tcgetattr(ctx->s, &tios);
+    /* Stop bit (1 or 2) */
+    if (stop_bit == 1)
+        tios.c_cflag &=~ CSTOPB;
+    else /* 2 */
+        tios.c_cflag |= CSTOPB;
+
+    /* Applying settings after all queued output has been written */
+    if (tcsetattr(ctx->s, TCSADRAIN, &tios) < 0) {
+        close(ctx->s);
+        ctx->s = -1;
+        return -1;
+    }
+    return 0;
+#endif
+}
+
+static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_length)
+{
+modbus_rtu_t *ctx_rtu = ctx->backend_data;
+#if defined(_WIN32)
     DWORD n_bytes = 0;
     return (WriteFile(ctx_rtu->w_ser.fd, req, req_length, &n_bytes, NULL)) ? (ssize_t)n_bytes : -1;
 #else
+
+/* Setting stopbits for transmitting */
+if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
+    if (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit) != 0) {
+        return -1;
+        }
+    }
+
+ssize_t ret;
 #if HAVE_DECL_TIOCM_RTS
-    modbus_rtu_t *ctx_rtu = ctx->backend_data;
     if (ctx_rtu->rts != MODBUS_RTU_RTS_NONE) {
         ssize_t size;
 
@@ -294,10 +339,16 @@ static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_lengt
         return size;
     } else {
 #endif
-        return write(ctx->s, req, req_length);
+        ret = write(ctx->s, req, req_length);
 #if HAVE_DECL_TIOCM_RTS
     }
 #endif
+
+/* Setting stopbits for receiving */
+if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
+    ret = (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit_receive) == 0) ? ret : -1;
+    }
+return ret;
 #endif
 }
 
@@ -393,43 +444,6 @@ static int _modbus_rtu_check_integrity(modbus_t *ctx, uint8_t *msg,
     }
 }
 
-
-/* Sets up stopbits for RTU-communications serial device */
-static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
-{
-#if defined(_WIN32)
-    if (ctx->debug) {
-        fprintf(stderr, "This function isn't supported on your platform\n");
-    }
-    errno = ENOTSUP;
-    return -1;
-#else
-    struct termios tios;
-
-    /* Check is fd still valid */
-    if (fcntl(ctx->s, F_GETFL) == -1) {
-        if (ctx->debug) {
-            fprintf(stderr, "ERROR: Port is not open (%s)\n", strerror(errno));
-        }
-        return -1;
-    }
-
-    tcgetattr(ctx->s, &tios);
-    /* Stop bit (1 or 2) */
-    if (stop_bit == 1)
-        tios.c_cflag &=~ CSTOPB;
-    else /* 2 */
-        tios.c_cflag |= CSTOPB;
-
-    /* Applying settings after all queued output has been written */
-    if (tcsetattr(ctx->s, TCSADRAIN, &tios) < 0) {
-        close(ctx->s);
-        ctx->s = -1;
-        return -1;
-    }
-    return 0;
-#endif
-}
 
 /* Sets up a serial port for RTU communications */
 static int _modbus_rtu_connect(modbus_t *ctx)
