@@ -301,20 +301,20 @@ static uint32_t _timeval_to_usec(struct timeval *tv) {
 
 static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_length)
 {
-modbus_rtu_t *ctx_rtu = ctx->backend_data;
+    modbus_rtu_t *ctx_rtu = ctx->backend_data;
 #if defined(_WIN32)
     DWORD n_bytes = 0;
     return (WriteFile(ctx_rtu->w_ser.fd, req, req_length, &n_bytes, NULL)) ? (ssize_t)n_bytes : -1;
 #else
 
-/* Setting stopbits for transmitting */
-if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
-    if (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit) != 0) {
-        return -1;
+    /* Setting stopbits for transmitting */
+    if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
+        if (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit) != 0) {
+            return -1;
         }
     }
 
-ssize_t ret;
+    ssize_t ret;
 #if HAVE_DECL_TIOCM_RTS
     if (ctx_rtu->rts != MODBUS_RTU_RTS_NONE) {
         ssize_t size;
@@ -332,29 +332,29 @@ ssize_t ret;
         ctx_rtu->set_rts(ctx, ctx_rtu->rts != MODBUS_RTU_RTS_UP);
 
         return size;
-    } else {
+        } else {
 #endif
         ret = write(ctx->s, req, req_length);
 #if HAVE_DECL_TIOCM_RTS
     }
 #endif
 
-/* Setting stopbits for receiving (waiting, intill all data goes from output buffer) */
-if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
-    int fd_buffered = 1;
-    struct timeval start_ts, now;
-    gettimeofday(&start_ts, NULL);
-    gettimeofday(&now, NULL);
-    while ((fd_buffered > 0) && (_timeval_to_usec(&now) - _timeval_to_usec(&start_ts) < _timeval_to_usec(&ctx->response_timeout))) {
-        usleep(100000);
-        ioctl(ctx->s, TIOCOUTQ, &fd_buffered);
+    /* Setting stopbits for receiving (waiting, intill all data goes from output buffer) */
+    if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
+        int fd_buffered = 1;
+        struct timeval start_ts, now;
+        gettimeofday(&start_ts, NULL);
         gettimeofday(&now, NULL);
+        while ((fd_buffered > 0) && (_timeval_to_usec(&now) - _timeval_to_usec(&start_ts) < _timeval_to_usec(&ctx->response_timeout))) {
+            usleep(100000);
+            ioctl(ctx->s, TIOCOUTQ, &fd_buffered);
+            gettimeofday(&now, NULL);
+        }
+        tcdrain(ctx->s);
+        ret = (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit_receive) == 0) ? ret : -1;
     }
-    tcdrain(ctx->s);
-    ret = (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit_receive) == 0) ? ret : -1;
-    }
-return ret;
-#endif
+    return ret;
+    #endif
 }
 
 static int _modbus_rtu_receive(modbus_t *ctx, uint8_t *req)
