@@ -267,16 +267,10 @@ static void _modbus_rtu_ioctl_rts(modbus_t *ctx, int on)
 }
 #endif
 
+#ifndef _WIN32
 /* Sets up stopbits for RTU-communications serial device */
 static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
 {
-#if defined(_WIN32)
-    if (ctx->debug) {
-        fprintf(stderr, "This function isn't supported on your platform\n");
-    }
-    errno = ENOTSUP;
-    return -1;
-#else
     struct termios tios;
     tcgetattr(ctx->s, &tios);
     /* Stop bit (1 or 2) */
@@ -292,10 +286,10 @@ static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
         return -1;
     }
     return 0;
-#endif
 }
+#endif
 
-static uint32_t _timeval_to_usec(struct timeval *tv) {
+static uint64_t _timeval_to_usec(struct timeval *tv) {
     return tv->tv_sec * 1000000 + tv->tv_usec;
 }
 
@@ -1357,21 +1351,15 @@ modbus_t* modbus_new_rtu(const char *device,
     return ctx;
 }
 
+#ifndef _WIN32
 modbus_t* modbus_new_rtu_different_stopbits(const char *device,
                          int baud, char parity, int data_bit,
                          int stop_bit, int stop_bit_receive)
 {
     modbus_t *ctx = modbus_new_rtu(device, baud, parity, data_bit, stop_bit);
-# if defined(_WIN32)
-    if (ctx->debug) {
-        fprintf(stderr, "This function isn't supported on your platform\n");
-    }
-    errno = ENOTSUP;
-    return -1;
-# else
     modbus_rtu_t *ctx_rtu;
     ctx_rtu = (modbus_rtu_t *)ctx->backend_data;
     ctx_rtu->stop_bit_receive = stop_bit_receive;
     return ctx;
-#endif
 }
+#endif
