@@ -1,3 +1,9 @@
+libmodbus (3.1.6-wb1) unstable; urgency=medium
+
+  * Disable RTU address filtering
+
+ -- Nikolay Korotkiy <nikolay.korotkiy@wirenboard.com>  Fri, 19 May 2023 10:20:00 +0400
+
 libmodbus (3.1.6-2) unstable; urgency=medium
 
   [ Kun-Hung Tsai (蔡昆宏) ]
