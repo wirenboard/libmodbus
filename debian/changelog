@@ -1,3 +1,9 @@
+libmodbus (3.1.11-2+wb100) unstable; urgency=medium
+
+  * Disable RTU address filtering
+
+ -- Nikolay Korotkiy <nikolay.korotkiy@wirenboard.com>  Thu, 18 Apr 2025 17:20:00 +0400
+
 libmodbus (3.1.11-2) unstable; urgency=medium
 
   * Fix FTBFS due to unit-tests.sh failure (Closes: #1094127)
