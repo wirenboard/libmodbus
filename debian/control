@@ -1,0 +1,35 @@
+Source: libmodbus
+Priority: optional
+Maintainer: SZ Lin (林上智) <szlin@debian.org>
+Uploaders: Ivo De Decker <ivodd@debian.org>
+Standards-Version: 4.4.1
+Section: libs
+Build-Depends: debhelper-compat (= 12), asciidoc, xmlto, psmisc
+Rules-Requires-Root: no
+Homepage: http://libmodbus.org/
+Vcs-Git: https://salsa.debian.org/debian/libmodbus.git
+Vcs-Browser: https://salsa.debian.org/debian/libmodbus
+
+Package: libmodbus5
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Pre-Depends: ${misc:Pre-Depends}
+Multi-Arch: same
+Description: library for the Modbus protocol
+ A Modbus library written in C, to send/receive data with a device which
+ respects the Modbus protocol. This library can use a serial port or an
+ Ethernet connection.
+ .
+ This package contains the shared library.
+
+Package: libmodbus-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends: libmodbus5 (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
+Description: development files for the Modbus protocol library
+ A Modbus library written in C, to send/receive data with a device which
+ respects the Modbus protocol. This library can use a serial port or an
+ Ethernet connection.
+ .
+ This package contains the development files.
