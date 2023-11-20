@@ -1,3 +1,9 @@
+libmodbus (3.1.6-wb2) unstable; urgency=medium
+
+  * Add arm64 build, no functional changes
+
+ -- Nikolay Korotkiy <nikolay.korotkiy@wirenboard.com>  Wed, 15 Nov 2023 13:01:00 +0400
+
 libmodbus (3.1.6-wb1) unstable; urgency=medium
 
   * Disable RTU address filtering
