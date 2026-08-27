@@ -12,8 +12,8 @@
 # http://www.gnu.org/software/libtool/manual/html_node/Libtool-versioning.html
 #
 m4_define([libmodbus_version_major], [3])
-m4_define([libmodbus_version_minor], [1])
-m4_define([libmodbus_version_micro], [11])
+m4_define([libmodbus_version_minor], [2])
+m4_define([libmodbus_version_micro], [0])
 
 m4_define([libmodbus_release_status],
     [m4_if(m4_eval(libmodbus_version_minor % 2), [1], [snapshot], [release])])
@@ -29,7 +29,11 @@ AC_INIT([libmodbus],
         [http://libmodbus.org/])
 AC_CONFIG_SRCDIR([src/modbus.c])
 AC_CONFIG_AUX_DIR([build-aux])
-AM_INIT_AUTOMAKE([check-news foreign 1.11 silent-rules tar-pax subdir-objects])
+AM_INIT_AUTOMAKE([foreign 1.11 silent-rules tar-pax subdir-objects])
+
+# Check if user provided CFLAGS before AC_PROG_CC sets defaults
+user_set_cflags="${CFLAGS+set}"
+
 AC_PROG_CC
 AC_USE_SYSTEM_EXTENSIONS
 AC_SYS_LARGEFILE
@@ -146,6 +150,8 @@ fi
 AC_CHECK_DECLS([TIOCSRS485], [], [], [[#include <sys/ioctl.h>]])
 # Check for RTS flags
 AC_CHECK_DECLS([TIOCM_RTS], [], [], [[#include <sys/ioctl.h>]])
+# Check for termios2 support
+AC_CHECK_TYPES([struct termios2], [], [], [[#include <asm/termbits.h>]])
 
 WARNING_CFLAGS="-Wall \
 -Wmissing-declarations -Wmissing-prototypes \
@@ -178,13 +184,18 @@ AC_ARG_ENABLE([debug],
   [enable_debug=$enableval],
   [enable_debug=no])
 
+# Set project-specific optimization flags based on debug mode.
+# These are added via AM_CFLAGS in Makefile.am, preserving user's CFLAGS.
 AS_IF([test "x$enable_debug" = "xyes"], [
-  CFLAGS="-g -O0"
-  CXXFLAGS="-g -O0"
+  LIBMODBUSCFLAGS="-g -O0"
+  # Clear AC_PROG_CC's default -O2 so debug mode works, unless user set CFLAGS
+  AS_IF([test "x$user_set_cflags" != "xset"], [
+    CFLAGS="-g"
+  ])
 ], [
-  CFLAGS="-O2"
-  CXXFLAGS="-O2"
+  LIBMODBUSCFLAGS="-O2"
 ])
+AC_SUBST([LIBMODBUSCFLAGS])
 
 AC_OUTPUT
 AC_MSG_RESULT([
@@ -197,7 +208,7 @@ AC_MSG_RESULT([
         includedir:             ${includedir}
 
         compiler:               ${CC}
-        cflags:                 ${CFLAGS} ${WARNING_CFLAGS}
+        cflags:                 ${LIBMODBUSCFLAGS} ${WARNING_CFLAGS} ${CFLAGS}
         ldflags:                ${LDFLAGS}
 
         tests:                  ${enable_tests}
