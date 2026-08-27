@@ -32,6 +32,7 @@ libmodbus.so.5 libmodbus5 #MINVER#
  modbus_new_rtu@Base 3.0.2
  modbus_new_tcp@Base 3.0.2
  modbus_new_tcp_pi@Base 3.0.2
+ modbus_proxy@Base 3.2.0
  modbus_read_bits@Base 3.0.2
  modbus_read_input_bits@Base 3.0.2
  modbus_read_input_registers@Base 3.0.2
