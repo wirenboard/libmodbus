@@ -13,8 +13,8 @@ diff --git a/tests/unit-test-client.c b/tests/unit-test-client.c
 index a1813b1..dae70e3 100644
 --- a/tests/unit-test-client.c
 +++ b/tests/unit-test-client.c
-@@ -676,7 +676,7 @@ int main(int argc, char *argv[])
-     modbus_set_response_timeout(ctx, 0, 1);
+@@ -726,7 +726,7 @@ int main(int argc, char *argv[])
+     modbus_set_response_timeout(invalid_ctx, 0, 1);
      rc = modbus_connect(invalid_ctx);
      printf("8/8 Connection timeout: ");
 -    ASSERT_TRUE(rc == -1 && errno == ETIMEDOUT, "");
