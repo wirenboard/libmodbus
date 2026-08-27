@@ -1,3 +1,1 @@
-Preserve-CFLAGS-and-related-parameters.patch
 Fix-resolve-FTBFS-due-to-unit-tests.sh-failure.patch
-unit_tests.sh-fails-in-last-check-with-timeouted-server-c.patch
