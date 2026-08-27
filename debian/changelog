@@ -1,3 +1,19 @@
+libmodbus (3.2.0-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream version 3.2.0
+  * Drop patches now part of upstream codebase:
+    - Preserve-CFLAGS-and-related-parameters.patch
+    - unit_tests.sh-fails-in-last-check-with-timeouted-server-c.patch
+  * Refresh patch Fix-resolve-FTBFS-due-to-unit-tests.sh-failure.patch
+  * Drop R^3: no, default now
+  * Fix copyright file, remove reference to old fsf address to fix lintian warning
+  * Bump std-version to 4.7.4, no changes required
+  * Update symbols file
+  * Update docs for README->README.md move
+
+ -- Gianfranco Costamagna <locutusofborg@debian.org>  Thu, 27 Aug 2026 16:36:09 +0200
+
 libmodbus (3.1.11-2) unstable; urgency=medium
 
   * Fix FTBFS due to unit-tests.sh failure (Closes: #1094127)
