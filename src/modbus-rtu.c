@@ -366,19 +366,21 @@ static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_lengt
 #endif
 
     /* Setting stopbits for receiving: wait until the request has left the
-       output buffer, otherwise the new setting would apply to its tail */
+       output buffer, otherwise the new setting would apply to its tail.
+       tcdrain() alone is not enough here: it returns before the last byte has
+       actually left the line, and switching the stop bits that early corrupts
+       the request. */
     if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
-        int fd_buffered = 0;
+        int fd_buffered = 1;
         struct timeval start_ts, now;
         uint64_t timeout = _timeval_to_usec(&ctx->response_timeout);
 
         gettimeofday(&start_ts, NULL);
-        while (ioctl(ctx->s, TIOCOUTQ, &fd_buffered) == 0 && fd_buffered > 0) {
+        gettimeofday(&now, NULL);
+        while ((fd_buffered > 0) && (_timeval_to_usec(&now) - _timeval_to_usec(&start_ts) < timeout)) {
+            usleep(100000);
+            ioctl(ctx->s, TIOCOUTQ, &fd_buffered);
             gettimeofday(&now, NULL);
-            if (_timeval_to_usec(&now) - _timeval_to_usec(&start_ts) >= timeout) {
-                break;
-            }
-            usleep(1000);
         }
         tcdrain(ctx->s);
         ret = (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit_receive) == 0) ? ret : -1;
