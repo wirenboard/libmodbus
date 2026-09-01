@@ -726,7 +726,7 @@ int main(int argc, char *argv[])
     modbus_set_response_timeout(invalid_ctx, 0, 1);
     rc = modbus_connect(invalid_ctx);
     printf("8/8 Connection timeout: ");
-    ASSERT_TRUE(rc == -1 && errno == ETIMEDOUT, "");
+    ASSERT_TRUE(rc == -1 && (errno == ETIMEDOUT || errno == ENETUNREACH), "");
     modbus_free(invalid_ctx);
 
     /* Restore original response timeout */

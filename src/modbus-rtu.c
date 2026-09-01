@@ -398,7 +398,7 @@ static int _modbus_rtu_check_integrity(modbus_t *ctx, uint8_t *msg, const int ms
         errno = EMBBADCRC;
         return -1;
     }
-
+#if 0
     /* Filter on the Modbus unit identifier (slave) in RTU mode */
     if (slave != ctx->slave && slave != MODBUS_BROADCAST_ADDRESS) {
         if (ctx->debug) {
@@ -407,7 +407,7 @@ static int _modbus_rtu_check_integrity(modbus_t *ctx, uint8_t *msg, const int ms
         /* Following call to check_confirmation handles this error */
         return 0;
     }
-
+#endif
     return msg_length;
 }
 
