@@ -301,8 +301,9 @@ static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
 }
 #endif
 
-static uint64_t _timeval_to_usec(struct timeval *tv) {
-    return tv->tv_sec * 1000000 + tv->tv_usec;
+static uint64_t _timeval_to_usec(const struct timeval *tv)
+{
+    return (uint64_t) tv->tv_sec * 1000000 + (uint64_t) tv->tv_usec;
 }
 
 static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_length)
@@ -356,30 +357,34 @@ static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_lengt
         }
         ctx_rtu->set_rts(ctx, ctx_rtu->rts != MODBUS_RTU_RTS_UP);
 
-        return size;
-        } else {
+        ret = size;
+    } else {
 #endif
         ret = write(ctx->s, req, req_length);
 #if HAVE_DECL_TIOCM_RTS
     }
 #endif
 
-    /* Setting stopbits for receiving (waiting, intill all data goes from output buffer) */
+    /* Setting stopbits for receiving: wait until the request has left the
+       output buffer, otherwise the new setting would apply to its tail */
     if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
-        int fd_buffered = 1;
+        int fd_buffered = 0;
         struct timeval start_ts, now;
+        uint64_t timeout = _timeval_to_usec(&ctx->response_timeout);
+
         gettimeofday(&start_ts, NULL);
-        gettimeofday(&now, NULL);
-        while ((fd_buffered > 0) && (_timeval_to_usec(&now) - _timeval_to_usec(&start_ts) < _timeval_to_usec(&ctx->response_timeout))) {
-            usleep(100000);
-            ioctl(ctx->s, TIOCOUTQ, &fd_buffered);
+        while (ioctl(ctx->s, TIOCOUTQ, &fd_buffered) == 0 && fd_buffered > 0) {
             gettimeofday(&now, NULL);
+            if (_timeval_to_usec(&now) - _timeval_to_usec(&start_ts) >= timeout) {
+                break;
+            }
+            usleep(1000);
         }
         tcdrain(ctx->s);
         ret = (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit_receive) == 0) ? ret : -1;
     }
     return ret;
-    #endif
+#endif
 }
 
 static int _modbus_rtu_receive(modbus_t *ctx, uint8_t *req)
