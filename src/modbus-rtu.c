@@ -267,16 +267,32 @@ static void _modbus_rtu_ioctl_rts(modbus_t *ctx, int on)
 /* Sets up stopbits for RTU-communications serial device */
 static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
 {
+#ifdef HAVE_STRUCT_TERMIOS2
+    struct termios2 tios;
+
+    if (ioctl(ctx->s, TCGETS2, &tios) < 0) {
+        return -1;
+    }
+#else
     struct termios tios;
-    tcgetattr(ctx->s, &tios);
+
+    if (tcgetattr(ctx->s, &tios) < 0) {
+        return -1;
+    }
+#endif
+
     /* Stop bit (1 or 2) */
     if (stop_bit == 1)
-        tios.c_cflag &=~ CSTOPB;
+        tios.c_cflag &= ~CSTOPB;
     else /* 2 */
         tios.c_cflag |= CSTOPB;
 
     /* Applying settings after all queued output has been written */
+#ifdef HAVE_STRUCT_TERMIOS2
+    if (ioctl(ctx->s, TCSETSW2, &tios) < 0) {
+#else
     if (tcsetattr(ctx->s, TCSADRAIN, &tios) < 0) {
+#endif
         close(ctx->s);
         ctx->s = -1;
         return -1;
@@ -1455,8 +1471,21 @@ modbus_t* modbus_new_rtu_different_stopbits(const char *device,
                          int baud, char parity, int data_bit,
                          int stop_bit, int stop_bit_receive)
 {
-    modbus_t *ctx = modbus_new_rtu(device, baud, parity, data_bit, stop_bit);
+    modbus_t *ctx;
     modbus_rtu_t *ctx_rtu;
+
+    /* Check stop_bit_receive argument, modbus_new_rtu checks the rest */
+    if (stop_bit_receive != 1 && stop_bit_receive != 2) {
+        fprintf(stderr, "The number of stop bits must be 1 or 2\n");
+        errno = EINVAL;
+        return NULL;
+    }
+
+    ctx = modbus_new_rtu(device, baud, parity, data_bit, stop_bit);
+    if (ctx == NULL) {
+        return NULL;
+    }
+
     ctx_rtu = (modbus_rtu_t *)ctx->backend_data;
     ctx_rtu->stop_bit_receive = stop_bit_receive;
     return ctx;
