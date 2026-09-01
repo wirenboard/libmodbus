@@ -1,28 +1,30 @@
 /*
- * Copyright © 2008-2014 Stéphane Raimbault <stephane.raimbault@gmail.com>
+ * Copyright © Stéphane Raimbault <stephane.raimbault@gmail.com>
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <stdio.h>
-#include <unistd.h>
-#include <string.h>
-#include <stdlib.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #include <modbus.h>
 
 #if defined(_WIN32)
 #include <ws2tcpip.h>
 #else
+#include <arpa/inet.h>
+#ifdef HAVE_NETINET_IN_H
+#include <netinet/in.h>
+#endif /* HAVE_NETINET_IN_H */
 #include <sys/select.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #endif
 
-#define NB_CONNECTION    5
+#define NB_CONNECTION 5
 
 static modbus_t *ctx = NULL;
 static modbus_mapping_t *mb_mapping;
@@ -52,11 +54,10 @@ int main(void)
 
     ctx = modbus_new_tcp("127.0.0.1", 1502);
 
-    mb_mapping = modbus_mapping_new(MODBUS_MAX_READ_BITS, 0,
-                                    MODBUS_MAX_READ_REGISTERS, 0);
+    mb_mapping =
+        modbus_mapping_new(MODBUS_MAX_READ_BITS, 0, MODBUS_MAX_READ_REGISTERS, 0);
     if (mb_mapping == NULL) {
-        fprintf(stderr, "Failed to allocate the mapping: %s\n",
-                modbus_strerror(errno));
+        fprintf(stderr, "Failed to allocate the mapping: %s\n", modbus_strerror(errno));
         modbus_free(ctx);
         return -1;
     }
@@ -72,7 +73,17 @@ int main(void)
 
     /* Clear the reference set of socket */
     FD_ZERO(&refset);
-    /* Add the server socket */
+    /* Add the server socket (modbus_tcp_listen already guarantees the
+     * descriptor is below FD_SETSIZE, but check defensively before FD_SET). */
+    if (server_socket >= FD_SETSIZE) {
+        fprintf(stderr,
+                "Server socket %d exceeds FD_SETSIZE (%d)\n",
+                server_socket,
+                FD_SETSIZE);
+        close(server_socket);
+        modbus_free(ctx);
+        return -1;
+    }
     FD_SET(server_socket, &refset);
 
     /* Keep track of the max file descriptor */
@@ -80,7 +91,7 @@ int main(void)
 
     for (;;) {
         rdset = refset;
-        if (select(fdmax+1, &rdset, NULL, NULL, NULL) == -1) {
+        if (select(fdmax + 1, &rdset, NULL, NULL, NULL) == -1) {
             perror("Server select() failure.");
             close_sigint(1);
         }
@@ -102,9 +113,18 @@ int main(void)
                 /* Handle new connections */
                 addrlen = sizeof(clientaddr);
                 memset(&clientaddr, 0, sizeof(clientaddr));
-                newfd = accept(server_socket, (struct sockaddr *)&clientaddr, &addrlen);
+                newfd = accept(server_socket, (struct sockaddr *) &clientaddr, &addrlen);
                 if (newfd == -1) {
                     perror("Server accept() error");
+                } else if (newfd >= FD_SETSIZE) {
+                    /* fd_set/FD_SET cannot represent a descriptor >= FD_SETSIZE;
+                     * setting it would corrupt the stack. Refuse the connection
+                     * instead. A real server should use poll()/epoll(). */
+                    fprintf(stderr,
+                            "Refusing socket %d: exceeds FD_SETSIZE (%d)\n",
+                            newfd,
+                            FD_SETSIZE);
+                    close(newfd);
                 } else {
                     FD_SET(newfd, &refset);
 
@@ -113,7 +133,9 @@ int main(void)
                         fdmax = newfd;
                     }
                     printf("New connection from %s:%d on socket %d\n",
-                           inet_ntoa(clientaddr.sin_addr), clientaddr.sin_port, newfd);
+                           inet_ntoa(clientaddr.sin_addr),
+                           clientaddr.sin_port,
+                           newfd);
                 }
             } else {
                 modbus_set_socket(ctx, master_socket);

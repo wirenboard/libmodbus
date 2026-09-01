@@ -1,5 +1,5 @@
 /*
- * Copyright © 2001-2011 Stéphane Raimbault <stephane.raimbault@gmail.com>
+ * Copyright © Stéphane Raimbault <stephane.raimbault@gmail.com>
  *
  * SPDX-License-Identifier: LGPL-2.1-or-later
  *
@@ -7,12 +7,12 @@
  * http://libmodbus.org/
  */
 
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdarg.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #ifndef _MSC_VER
 #include <unistd.h>
@@ -20,11 +20,15 @@
 
 #include <config.h>
 
-#include "modbus.h"
 #include "modbus-private.h"
+#include "modbus.h"
 
 /* Internal use */
 #define MSG_LENGTH_UNDEFINED -1
+
+/* The Modbus address space is 16-bit, so a mapping table cannot hold more
+   than 65536 entries. */
+#define MODBUS_MAX_TABLE_SIZE 65536
 
 /* Exported version */
 const unsigned int libmodbus_version_major = LIBMODBUS_VERSION_MAJOR;
@@ -41,7 +45,8 @@ typedef enum {
     _STEP_DATA
 } _step_t;
 
-const char *modbus_strerror(int errnum) {
+const char *modbus_strerror(int errnum)
+{
     switch (errnum) {
     case EMBXILFUN:
         return "Illegal function";
@@ -95,13 +100,12 @@ static void _sleep_response_timeout(modbus_t *ctx)
     /* Response timeout is always positive */
 #ifdef _WIN32
     /* usleep doesn't exist on Windows */
-    Sleep((ctx->response_timeout.tv_sec * 1000) +
-          (ctx->response_timeout.tv_usec / 1000));
+    Sleep((ctx->response_timeout.tv_sec * 1000) + (ctx->response_timeout.tv_usec / 1000));
 #else
     /* usleep source code */
     struct timespec request, remaining;
     request.tv_sec = ctx->response_timeout.tv_sec;
-    request.tv_nsec = ((long int)ctx->response_timeout.tv_usec) * 1000;
+    request.tv_nsec = ((long int) ctx->response_timeout.tv_usec) * 1000;
     while (nanosleep(&request, &remaining) == -1 && errno == EINTR) {
         request = remaining;
     }
@@ -125,7 +129,7 @@ int modbus_flush(modbus_t *ctx)
     return rc;
 }
 
-/* Computes the length of the expected response */
+/* Computes the length of the expected response including checksum */
 static unsigned int compute_response_length_from_request(modbus_t *ctx, uint8_t *req)
 {
     int length;
@@ -137,8 +141,7 @@ static unsigned int compute_response_length_from_request(modbus_t *ctx, uint8_t 
         /* Header + nb values (code from write_bits) */
         int nb = (req[offset + 3] << 8) | req[offset + 4];
         length = 2 + (nb / 8) + ((nb % 8) ? 1 : 0);
-    }
-        break;
+    } break;
     case MODBUS_FC_WRITE_AND_READ_REGISTERS:
     case MODBUS_FC_READ_HOLDING_REGISTERS:
     case MODBUS_FC_READ_INPUT_REGISTERS:
@@ -183,6 +186,23 @@ static int send_msg(modbus_t *ctx, uint8_t *msg, int msg_length)
         if (rc == -1) {
             _error_print(ctx, NULL);
             if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) {
+#ifdef _WIN32
+                int saved_errno = errno;
+                const int wsa_err = WSAGetLastError();
+
+                if (wsa_err == WSAENETRESET || wsa_err == WSAENOTCONN ||
+                    wsa_err == WSAENOTSOCK || wsa_err == WSAESHUTDOWN ||
+                    wsa_err == WSAEHOSTUNREACH || wsa_err == WSAECONNABORTED ||
+                    wsa_err == WSAECONNRESET || wsa_err == WSAETIMEDOUT) {
+                    modbus_close(ctx);
+                    _sleep_response_timeout(ctx);
+                    modbus_connect(ctx);
+                } else {
+                    _sleep_response_timeout(ctx);
+                    modbus_flush(ctx);
+                }
+                errno = saved_errno;
+#else
                 int saved_errno = errno;
 
                 if ((errno == EBADF || errno == ECONNRESET || errno == EPIPE)) {
@@ -194,10 +214,10 @@ static int send_msg(modbus_t *ctx, uint8_t *msg, int msg_length)
                     modbus_flush(ctx);
                 }
                 errno = saved_errno;
+#endif
             }
         }
-    } while ((ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) &&
-             rc == -1);
+    } while ((ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) && rc == -1);
 
     if (rc > 0 && rc != msg_length) {
         errno = EMBBADDATA;
@@ -207,13 +227,16 @@ static int send_msg(modbus_t *ctx, uint8_t *msg, int msg_length)
     return rc;
 }
 
-int modbus_send_raw_request(modbus_t *ctx, const uint8_t *raw_req, int raw_req_length)
+int modbus_send_raw_request_tid(modbus_t *ctx,
+                                const uint8_t *raw_req,
+                                int raw_req_length,
+                                int tid)
 {
     sft_t sft;
     uint8_t req[MAX_MESSAGE_LENGTH];
     int req_length;
 
-    if (ctx == NULL) {
+    if (ctx == NULL || raw_req == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -229,7 +252,7 @@ int modbus_send_raw_request(modbus_t *ctx, const uint8_t *raw_req, int raw_req_l
     sft.slave = raw_req[0];
     sft.function = raw_req[1];
     /* The t_id is left to zero */
-    sft.t_id = 0;
+    sft.t_id = tid;
     /* This response function only set the header so it's convenient here */
     req_length = ctx->backend->build_response_basis(&sft, req);
 
@@ -242,6 +265,11 @@ int modbus_send_raw_request(modbus_t *ctx, const uint8_t *raw_req, int raw_req_l
     return send_msg(ctx, req, req_length);
 }
 
+int modbus_send_raw_request(modbus_t *ctx, const uint8_t *raw_req, int raw_req_length)
+{
+    return modbus_send_raw_request_tid(ctx, raw_req, raw_req_length, 0);
+}
+
 /*
  *  ---------- Request     Indication ----------
  *  | Client | ---------------------->| Server |
@@ -249,8 +277,7 @@ int modbus_send_raw_request(modbus_t *ctx, const uint8_t *raw_req, int raw_req_l
  */
 
 /* Computes the length to read after the function received */
-static uint8_t compute_meta_length_after_function(int function,
-                                                  msg_type_t msg_type)
+static uint8_t compute_meta_length_after_function(int function, msg_type_t msg_type)
 {
     int length;
 
@@ -289,8 +316,8 @@ static uint8_t compute_meta_length_after_function(int function,
 }
 
 /* Computes the length to read after the meta information (address, count, etc) */
-static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
-                                          msg_type_t msg_type)
+static int
+compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
 {
     int function = msg[ctx->backend->header_length];
     int length;
@@ -323,7 +350,6 @@ static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
     return length;
 }
 
-
 /* Waits a response from a modbus server or a request from a modbus client.
    This function blocks if there is no replies (3 timeouts).
 
@@ -342,9 +368,12 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
     fd_set rset;
     struct timeval tv;
     struct timeval *p_tv;
-    int length_to_read;
+    unsigned int length_to_read;
     int msg_length = 0;
     _step_t step;
+#ifdef _WIN32
+    int wsa_err;
+#endif
 
     if (ctx->debug) {
         if (msg_type == MSG_INDICATION) {
@@ -354,8 +383,22 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
         }
     }
 
+    if (!ctx->backend->is_connected(ctx)) {
+        if (ctx->debug) {
+            fprintf(stderr, "ERROR The connection is not established.\n");
+        }
+        return -1;
+    }
+
     /* Add a file descriptor to the set */
     FD_ZERO(&rset);
+    if (ctx->s < 0 || ctx->s >= FD_SETSIZE) {
+        if (ctx->debug) {
+            fprintf(stderr, "ERROR Invalid socket descriptor %d\n", ctx->s);
+        }
+        errno = EINVAL;
+        return -1;
+    }
     FD_SET(ctx->s, &rset);
 
     /* We need to analyse the message step by step.  At the first step, we want
@@ -365,13 +408,13 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
     length_to_read = ctx->backend->header_length + 1;
 
     if (msg_type == MSG_INDICATION) {
-        /* Wait for a message, we don't know when the message will be
-         * received */
+        /* Wait for a message, we don't know when the message will be received */
         if (ctx->indication_timeout.tv_sec == 0 && ctx->indication_timeout.tv_usec == 0) {
             /* By default, the indication timeout isn't set */
             p_tv = NULL;
         } else {
-            /* Wait for an indication (name of a received request by a server, see schema) */
+            /* Wait for an indication (name of a received request by a server, see schema)
+             */
             tv.tv_sec = ctx->indication_timeout.tv_sec;
             tv.tv_usec = ctx->indication_timeout.tv_usec;
             p_tv = &tv;
@@ -387,6 +430,18 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
         if (rc == -1) {
             _error_print(ctx, "select");
             if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) {
+#ifdef _WIN32
+                int saved_errno = errno;
+
+                wsa_err = WSAGetLastError();
+
+                // no equivalent to ETIMEDOUT when select fails on Windows
+                if (wsa_err == WSAENETDOWN || wsa_err == WSAENOTSOCK) {
+                    modbus_close(ctx);
+                    modbus_connect(ctx);
+                }
+                errno = saved_errno;
+#else
                 int saved_errno = errno;
 
                 if (errno == ETIMEDOUT) {
@@ -397,6 +452,7 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
                     modbus_connect(ctx);
                 }
                 errno = saved_errno;
+#endif
             }
             return -1;
         }
@@ -409,22 +465,36 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
 
         if (rc == -1) {
             _error_print(ctx, "read");
+#ifdef _WIN32
+            wsa_err = WSAGetLastError();
             if ((ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) &&
-                (errno == ECONNRESET || errno == ECONNREFUSED ||
-                 errno == EBADF)) {
+                (wsa_err == WSAENOTCONN || wsa_err == WSAENETRESET ||
+                 wsa_err == WSAENOTSOCK || wsa_err == WSAESHUTDOWN ||
+                 wsa_err == WSAECONNABORTED || wsa_err == WSAETIMEDOUT ||
+                 wsa_err == WSAECONNRESET)) {
                 int saved_errno = errno;
                 modbus_close(ctx);
                 modbus_connect(ctx);
                 /* Could be removed by previous calls */
                 errno = saved_errno;
             }
+#else
+            if ((ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) &&
+                (errno == ECONNRESET || errno == ECONNREFUSED || errno == EBADF)) {
+                int saved_errno = errno;
+                modbus_close(ctx);
+                modbus_connect(ctx);
+                /* Could be removed by previous calls */
+                errno = saved_errno;
+            }
+#endif
             return -1;
         }
 
         /* Display the hex code of each character received */
         if (ctx->debug) {
             int i;
-            for (i=0; i < rc; i++)
+            for (i = 0; i < rc; i++)
                 printf("<%.2X>", msg[msg_length + i]);
         }
 
@@ -438,16 +508,14 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
             case _STEP_FUNCTION:
                 /* Function code position */
                 length_to_read = compute_meta_length_after_function(
-                    msg[ctx->backend->header_length],
-                    msg_type);
+                    msg[ctx->backend->header_length], msg_type);
                 if (length_to_read != 0) {
                     step = _STEP_META;
                     break;
                 } /* else switches straight to the next step */
             case _STEP_META:
-                length_to_read = compute_data_length_after_meta(
-                    ctx, msg, msg_type);
-                if ((msg_length + length_to_read) > (int)ctx->backend->max_adu_length) {
+                length_to_read = compute_data_length_after_meta(ctx, msg, msg_type);
+                if ((msg_length + length_to_read) > ctx->backend->max_adu_length) {
                     errno = EMBBADDATA;
                     _error_print(ctx, "too many data");
                     return -1;
@@ -507,12 +575,11 @@ int modbus_receive_confirmation(modbus_t *ctx, uint8_t *rsp)
     return _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
 }
 
-static int check_confirmation(modbus_t *ctx, uint8_t *req,
-                              uint8_t *rsp, int rsp_length)
+static int check_confirmation(modbus_t *ctx, uint8_t *req, uint8_t *rsp, int rsp_length)
 {
     int rc;
     int rsp_length_computed;
-    const int offset = ctx->backend->header_length;
+    const unsigned int offset = ctx->backend->header_length;
     const int function = rsp[offset];
 
     if (ctx->backend->pre_check_confirmation) {
@@ -530,7 +597,7 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
 
     /* Exception code */
     if (function >= 0x80) {
-        if (rsp_length == (offset + 2 + (int)ctx->backend->checksum_length) &&
+        if (rsp_length == (int) (offset + 2 + ctx->backend->checksum_length) &&
             req[offset] == (rsp[offset] - 0x80)) {
             /* Valid exception code received */
 
@@ -555,13 +622,17 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
         function < 0x80) {
         int req_nb_value;
         int rsp_nb_value;
+        int resp_addr_ok = TRUE;
+        int resp_data_ok = TRUE;
 
         /* Check function code */
         if (function != req[offset]) {
             if (ctx->debug) {
-                fprintf(stderr,
-                        "Received function not corresponding to the request (0x%X != 0x%X)\n",
-                        function, req[offset]);
+                fprintf(
+                    stderr,
+                    "Received function not corresponding to the request (0x%X != 0x%X)\n",
+                    function,
+                    req[offset]);
             }
             if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_PROTOCOL) {
                 _sleep_response_timeout(ctx);
@@ -591,6 +662,11 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
             break;
         case MODBUS_FC_WRITE_MULTIPLE_COILS:
         case MODBUS_FC_WRITE_MULTIPLE_REGISTERS:
+            /* address in request and response must be equal */
+            if ((req[offset + 1] != rsp[offset + 1]) ||
+                (req[offset + 2] != rsp[offset + 2])) {
+                resp_addr_ok = FALSE;
+            }
             /* N Write functions */
             req_nb_value = (req[offset + 3] << 8) + req[offset + 4];
             rsp_nb_value = (rsp[offset + 3] << 8) | rsp[offset + 4];
@@ -599,18 +675,36 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
             /* Report slave ID (bytes received) */
             req_nb_value = rsp_nb_value = rsp[offset + 1];
             break;
+        case MODBUS_FC_WRITE_SINGLE_COIL:
+        case MODBUS_FC_WRITE_SINGLE_REGISTER:
+            /* address in request and response must be equal */
+            if ((req[offset + 1] != rsp[offset + 1]) ||
+                (req[offset + 2] != rsp[offset + 2])) {
+                resp_addr_ok = FALSE;
+            }
+            /* data in request and response must be equal */
+            if ((req[offset + 3] != rsp[offset + 3]) ||
+                (req[offset + 4] != rsp[offset + 4])) {
+                resp_data_ok = FALSE;
+            }
+            /* 1 Write functions & others */
+            req_nb_value = rsp_nb_value = 1;
+            break;
         default:
             /* 1 Write functions & others */
             req_nb_value = rsp_nb_value = 1;
+            break;
         }
 
-        if (req_nb_value == rsp_nb_value) {
+        if ((req_nb_value == rsp_nb_value) && (resp_addr_ok == TRUE) &&
+            (resp_data_ok == TRUE)) {
             rc = rsp_nb_value;
         } else {
             if (ctx->debug) {
                 fprintf(stderr,
-                        "Quantity not corresponding to the request (%d != %d)\n",
-                        rsp_nb_value, req_nb_value);
+                        "Received data not corresponding to the request (%d != %d)\n",
+                        rsp_nb_value,
+                        req_nb_value);
             }
 
             if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_PROTOCOL) {
@@ -623,9 +717,11 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
         }
     } else {
         if (ctx->debug) {
-            fprintf(stderr,
-                    "Message length not corresponding to the computed length (%d != %d)\n",
-                    rsp_length, rsp_length_computed);
+            fprintf(
+                stderr,
+                "Message length not corresponding to the computed length (%d != %d)\n",
+                rsp_length,
+                rsp_length_computed);
         }
         if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_PROTOCOL) {
             _sleep_response_timeout(ctx);
@@ -638,9 +734,8 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
     return rc;
 }
 
-static int response_io_status(uint8_t *tab_io_status,
-                              int address, int nb,
-                              uint8_t *rsp, int offset)
+static int
+response_io_status(uint8_t *tab_io_status, int address, int nb, uint8_t *rsp, int offset)
 {
     int shift = 0;
     /* Instead of byte (not allowed in Win32) */
@@ -665,10 +760,13 @@ static int response_io_status(uint8_t *tab_io_status,
 }
 
 /* Build the exception response */
-static int response_exception(modbus_t *ctx, sft_t *sft,
-                              int exception_code, uint8_t *rsp,
+static int response_exception(modbus_t *ctx,
+                              sft_t *sft,
+                              int exception_code,
+                              uint8_t *rsp,
                               unsigned int to_flush,
-                              const char* template, ...)
+                              const char *template,
+                              ...)
 {
     int rsp_length;
 
@@ -701,30 +799,82 @@ static int response_exception(modbus_t *ctx, sft_t *sft,
    If an error occurs, this function construct the response
    accordingly.
 */
-int modbus_reply(modbus_t *ctx, const uint8_t *req,
-                 int req_length, modbus_mapping_t *mb_mapping)
+int modbus_reply(modbus_t *ctx,
+                 const uint8_t *req,
+                 int req_length,
+                 modbus_mapping_t *mb_mapping)
 {
-    int offset;
+    unsigned int offset;
     int slave;
     int function;
     uint16_t address;
     uint8_t rsp[MAX_MESSAGE_LENGTH];
     int rsp_length = 0;
     sft_t sft;
+    uint8_t meta_length;
+    int data_length;
 
-    if (ctx == NULL) {
+    if (ctx == NULL || req == NULL || mb_mapping == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     offset = ctx->backend->header_length;
+
+    /* The request must contain at least a slave address and a function code
+       before they can be read. */
+    if (req_length < (int) (offset + 1)) {
+        errno = EMBBADDATA;
+        return -1;
+    }
+
     slave = req[offset - 1];
     function = req[offset];
-    address = (req[offset + 1] << 8) + req[offset + 2];
+
+    /* Some function codes (eg. FC_READ_EXCEPTION_STATUS, FC_REPORT_SLAVE_ID)
+       carry no address in the request PDU, so only read when available. Reading
+       them is safe as it fits within MODBUS_MAX_ADU_LENGTH, it's just for
+       coherency.
+    */
+    if (req_length >= (int) (offset + 3))
+        address = (req[offset + 1] << 8) + req[offset + 2];
+    else
+        address = 0;
 
     sft.slave = slave;
     sft.function = function;
-    sft.t_id = ctx->backend->prepare_response_tid(req, &req_length);
+    sft.t_id = ctx->backend->get_response_tid(req);
+
+    /* Ensure the request is long enough to contain the meta fields (address,
+       quantity, byte count...) and the declared data read by the handlers
+       below. On the canonical modbus_receive() path the framing layer already
+       guarantees a complete PDU; this check defends direct callers that pass a
+       truncated or untrusted request to modbus_reply(). */
+    meta_length = compute_meta_length_after_function(function, MSG_INDICATION);
+    data_length = 0;
+    if (req_length >= (int) (offset + 1 + meta_length)) {
+        /* The meta fields (including the byte count) are present, so the
+           declared data length can be read safely. */
+        data_length = compute_data_length_after_meta(ctx, (uint8_t *) req, MSG_INDICATION);
+    }
+    if (req_length < (int) (offset + 1 + meta_length + data_length)) {
+        rsp_length = response_exception(ctx,
+                                        &sft,
+                                        MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                                        rsp,
+                                        TRUE,
+                                        "Truncated request (length %d) for function "
+                                        "0x%0X in modbus_reply\n",
+                                        req_length,
+                                        function);
+        /* Suppress responses to broadcasts in RTU, see below. */
+        if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_RTU &&
+            slave == MODBUS_BROADCAST_ADDRESS &&
+            !(ctx->quirks & MODBUS_QUIRK_REPLY_TO_BROADCAST)) {
+            return 0;
+        }
+        return send_msg(ctx, rsp, rsp_length);
+    }
 
     /* Data are flushed on illegal number of values errors. */
     switch (function) {
@@ -734,53 +884,72 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
         int start_bits = is_input ? mb_mapping->start_input_bits : mb_mapping->start_bits;
         int nb_bits = is_input ? mb_mapping->nb_input_bits : mb_mapping->nb_bits;
         uint8_t *tab_bits = is_input ? mb_mapping->tab_input_bits : mb_mapping->tab_bits;
-        const char * const name = is_input ? "read_input_bits" : "read_bits";
+        const char *const name = is_input ? "read_input_bits" : "read_bits";
         int nb = (req[offset + 3] << 8) + req[offset + 4];
         /* The mapping can be shifted to reduce memory consumption and it
            doesn't always start at address zero. */
         int mapping_address = address - start_bits;
 
         if (nb < 1 || MODBUS_MAX_READ_BITS < nb) {
-            rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, rsp, TRUE,
-                "Illegal nb of values %d in %s (max %d)\n",
-                nb, name, MODBUS_MAX_READ_BITS);
+            rsp_length = response_exception(ctx,
+                                            &sft,
+                                            MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                                            rsp,
+                                            TRUE,
+                                            "Illegal nb of values %d in %s (max %d)\n",
+                                            nb,
+                                            name,
+                                            MODBUS_MAX_READ_BITS);
         } else if (mapping_address < 0 || (mapping_address + nb) > nb_bits) {
-            rsp_length = response_exception(
-                ctx, &sft,
-                MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
-                "Illegal data address 0x%0X in %s\n",
-                mapping_address < 0 ? address : address + nb, name);
+            rsp_length = response_exception(ctx,
+                                            &sft,
+                                            MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS,
+                                            rsp,
+                                            FALSE,
+                                            "Illegal data address 0x%0X in %s\n",
+                                            mapping_address < 0 ? address : address + nb,
+                                            name);
         } else {
             rsp_length = ctx->backend->build_response_basis(&sft, rsp);
             rsp[rsp_length++] = (nb / 8) + ((nb % 8) ? 1 : 0);
-            rsp_length = response_io_status(tab_bits, mapping_address, nb,
-                                            rsp, rsp_length);
+            rsp_length =
+                response_io_status(tab_bits, mapping_address, nb, rsp, rsp_length);
         }
-    }
-        break;
+    } break;
     case MODBUS_FC_READ_HOLDING_REGISTERS:
     case MODBUS_FC_READ_INPUT_REGISTERS: {
         unsigned int is_input = (function == MODBUS_FC_READ_INPUT_REGISTERS);
-        int start_registers = is_input ? mb_mapping->start_input_registers : mb_mapping->start_registers;
-        int nb_registers = is_input ? mb_mapping->nb_input_registers : mb_mapping->nb_registers;
-        uint16_t *tab_registers = is_input ? mb_mapping->tab_input_registers : mb_mapping->tab_registers;
-        const char * const name = is_input ? "read_input_registers" : "read_registers";
+        int start_registers =
+            is_input ? mb_mapping->start_input_registers : mb_mapping->start_registers;
+        int nb_registers =
+            is_input ? mb_mapping->nb_input_registers : mb_mapping->nb_registers;
+        uint16_t *tab_registers =
+            is_input ? mb_mapping->tab_input_registers : mb_mapping->tab_registers;
+        const char *const name = is_input ? "read_input_registers" : "read_registers";
         int nb = (req[offset + 3] << 8) + req[offset + 4];
         /* The mapping can be shifted to reduce memory consumption and it
            doesn't always start at address zero. */
         int mapping_address = address - start_registers;
 
         if (nb < 1 || MODBUS_MAX_READ_REGISTERS < nb) {
-            rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, rsp, TRUE,
-                "Illegal nb of values %d in %s (max %d)\n",
-                nb, name, MODBUS_MAX_READ_REGISTERS);
+            rsp_length = response_exception(ctx,
+                                            &sft,
+                                            MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                                            rsp,
+                                            TRUE,
+                                            "Illegal nb of values %d in %s (max %d)\n",
+                                            nb,
+                                            name,
+                                            MODBUS_MAX_READ_REGISTERS);
         } else if (mapping_address < 0 || (mapping_address + nb) > nb_registers) {
-            rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
-                "Illegal data address 0x%0X in %s\n",
-                mapping_address < 0 ? address : address + nb, name);
+            rsp_length = response_exception(ctx,
+                                            &sft,
+                                            MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS,
+                                            rsp,
+                                            FALSE,
+                                            "Illegal data address 0x%0X in %s\n",
+                                            mapping_address < 0 ? address : address + nb,
+                                            name);
         } else {
             int i;
 
@@ -791,51 +960,93 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
                 rsp[rsp_length++] = tab_registers[i] & 0xFF;
             }
         }
-    }
-        break;
+    } break;
     case MODBUS_FC_WRITE_SINGLE_COIL: {
         int mapping_address = address - mb_mapping->start_bits;
 
         if (mapping_address < 0 || mapping_address >= mb_mapping->nb_bits) {
-            rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
-                "Illegal data address 0x%0X in write_bit\n",
-                address);
-        } else {
-            int data = (req[offset + 3] << 8) + req[offset + 4];
-
-            if (data == 0xFF00 || data == 0x0) {
-                mb_mapping->tab_bits[mapping_address] = data ? ON : OFF;
-                memcpy(rsp, req, req_length);
-                rsp_length = req_length;
-            } else {
-                rsp_length = response_exception(
-                    ctx, &sft,
-                    MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, rsp, FALSE,
-                    "Illegal data value 0x%0X in write_bit request at address %0X\n",
-                    data, address);
-            }
+            rsp_length = response_exception(ctx,
+                                            &sft,
+                                            MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS,
+                                            rsp,
+                                            FALSE,
+                                            "Illegal data address 0x%0X in write bit\n",
+                                            address);
+            break;
         }
-    }
-        break;
+
+        /* This check is only done here to ensure using memcpy is safe. */
+        rsp_length = compute_response_length_from_request(ctx, (uint8_t *) req);
+        if (rsp_length != req_length) {
+            /* Bad use of modbus_reply */
+            rsp_length = response_exception(
+                ctx,
+                &sft,
+                MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                rsp,
+                FALSE,
+                "Invalid request length in modbus_reply to write bit (%d)\n",
+                req_length);
+            break;
+        }
+
+        /* Don't copy the CRC, if any, it will be computed later (even if identical to the
+         * request) */
+        rsp_length -= ctx->backend->checksum_length;
+
+        int data = (req[offset + 3] << 8) + req[offset + 4];
+        if (data == 0xFF00 || data == 0x0) {
+            /* Apply the change to mapping */
+            mb_mapping->tab_bits[mapping_address] = data ? ON : OFF;
+            /* Prepare response */
+            memcpy(rsp, req, rsp_length);
+        } else {
+            rsp_length = response_exception(
+                ctx,
+                &sft,
+                MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                rsp,
+                FALSE,
+                "Illegal data value 0x%0X in write_bit request at address %0X\n",
+                data,
+                address);
+        }
+    } break;
     case MODBUS_FC_WRITE_SINGLE_REGISTER: {
         int mapping_address = address - mb_mapping->start_registers;
 
         if (mapping_address < 0 || mapping_address >= mb_mapping->nb_registers) {
-            rsp_length = response_exception(
-                ctx, &sft,
-                MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
-                "Illegal data address 0x%0X in write_register\n",
-                address);
-        } else {
-            int data = (req[offset + 3] << 8) + req[offset + 4];
-
-            mb_mapping->tab_registers[mapping_address] = data;
-            memcpy(rsp, req, req_length);
-            rsp_length = req_length;
+            rsp_length =
+                response_exception(ctx,
+                                   &sft,
+                                   MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS,
+                                   rsp,
+                                   FALSE,
+                                   "Illegal data address 0x%0X in write_register\n",
+                                   address);
+            break;
         }
-    }
-        break;
+
+        rsp_length = compute_response_length_from_request(ctx, (uint8_t *) req);
+        if (rsp_length != req_length) {
+            /* Bad use of modbus_reply */
+            rsp_length = response_exception(
+                ctx,
+                &sft,
+                MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                rsp,
+                FALSE,
+                "Invalid request length in modbus_reply to write register (%d)\n",
+                req_length);
+            break;
+        }
+        int data = (req[offset + 3] << 8) + req[offset + 4];
+
+        mb_mapping->tab_registers[mapping_address] = data;
+
+        rsp_length -= ctx->backend->checksum_length;
+        memcpy(rsp, req, rsp_length);
+    } break;
     case MODBUS_FC_WRITE_MULTIPLE_COILS: {
         int nb = (req[offset + 3] << 8) + req[offset + 4];
         int nb_bits = req[offset + 5];
@@ -845,29 +1056,34 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
             /* May be the indication has been truncated on reading because of
              * invalid address (eg. nb is 0 but the request contains values to
              * write) so it's necessary to flush. */
-            rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, rsp, TRUE,
-                "Illegal number of values %d in write_bits (max %d)\n",
-                nb, MODBUS_MAX_WRITE_BITS);
-        } else if (mapping_address < 0 ||
-                   (mapping_address + nb) > mb_mapping->nb_bits) {
-            rsp_length = response_exception(
-                ctx, &sft,
-                MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
-                "Illegal data address 0x%0X in write_bits\n",
-                mapping_address < 0 ? address : address + nb);
+            rsp_length =
+                response_exception(ctx,
+                                   &sft,
+                                   MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                                   rsp,
+                                   TRUE,
+                                   "Illegal number of values %d in write_bits (max %d)\n",
+                                   nb,
+                                   MODBUS_MAX_WRITE_BITS);
+        } else if (mapping_address < 0 || (mapping_address + nb) > mb_mapping->nb_bits) {
+            rsp_length = response_exception(ctx,
+                                            &sft,
+                                            MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS,
+                                            rsp,
+                                            FALSE,
+                                            "Illegal data address 0x%0X in write_bits\n",
+                                            mapping_address < 0 ? address : address + nb);
         } else {
             /* 6 = byte count */
-            modbus_set_bits_from_bytes(mb_mapping->tab_bits, mapping_address, nb,
-                                       &req[offset + 6]);
+            modbus_set_bits_from_bytes(
+                mb_mapping->tab_bits, mapping_address, nb, &req[offset + 6]);
 
             rsp_length = ctx->backend->build_response_basis(&sft, rsp);
             /* 4 to copy the bit address (2) and the quantity of bits */
             memcpy(rsp + rsp_length, req + rsp_length, 4);
             rsp_length += 4;
         }
-    }
-        break;
+    } break;
     case MODBUS_FC_WRITE_MULTIPLE_REGISTERS: {
         int nb = (req[offset + 3] << 8) + req[offset + 4];
         int nb_bytes = req[offset + 5];
@@ -875,15 +1091,24 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
 
         if (nb < 1 || MODBUS_MAX_WRITE_REGISTERS < nb || nb_bytes != nb * 2) {
             rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, rsp, TRUE,
+                ctx,
+                &sft,
+                MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                rsp,
+                TRUE,
                 "Illegal number of values %d in write_registers (max %d)\n",
-                nb, MODBUS_MAX_WRITE_REGISTERS);
+                nb,
+                MODBUS_MAX_WRITE_REGISTERS);
         } else if (mapping_address < 0 ||
                    (mapping_address + nb) > mb_mapping->nb_registers) {
-            rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
-                "Illegal data address 0x%0X in write_registers\n",
-                mapping_address < 0 ? address : address + nb);
+            rsp_length =
+                response_exception(ctx,
+                                   &sft,
+                                   MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS,
+                                   rsp,
+                                   FALSE,
+                                   "Illegal data address 0x%0X in write_registers\n",
+                                   mapping_address < 0 ? address : address + nb);
         } else {
             int i, j;
             for (i = mapping_address, j = 6; i < mapping_address + nb; i++, j += 2) {
@@ -897,8 +1122,7 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
             memcpy(rsp + rsp_length, req + rsp_length, 4);
             rsp_length += 4;
         }
-    }
-        break;
+    } break;
     case MODBUS_FC_REPORT_SLAVE_ID: {
         int str_len;
         int byte_count_pos;
@@ -914,35 +1138,54 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
         memcpy(rsp + rsp_length, "LMB" LIBMODBUS_VERSION_STRING, str_len);
         rsp_length += str_len;
         rsp[byte_count_pos] = rsp_length - byte_count_pos - 1;
-    }
-        break;
+    } break;
     case MODBUS_FC_READ_EXCEPTION_STATUS:
-        if (ctx->debug) {
-            fprintf(stderr, "FIXME Not implemented\n");
-        }
-        errno = ENOPROTOOPT;
-        return -1;
+        rsp_length = response_exception(ctx,
+                                        &sft,
+                                        MODBUS_EXCEPTION_ILLEGAL_FUNCTION,
+                                        rsp,
+                                        TRUE,
+                                        "Unsupported function: READ EXCEPTION STATUS (0x07)\n");
         break;
     case MODBUS_FC_MASK_WRITE_REGISTER: {
         int mapping_address = address - mb_mapping->start_registers;
 
         if (mapping_address < 0 || mapping_address >= mb_mapping->nb_registers) {
-            rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
-                "Illegal data address 0x%0X in write_register\n",
-                address);
+            rsp_length =
+                response_exception(ctx,
+                                   &sft,
+                                   MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS,
+                                   rsp,
+                                   FALSE,
+                                   "Illegal data address 0x%0X in write_register\n",
+                                   address);
         } else {
-            uint16_t data = mb_mapping->tab_registers[mapping_address];
+            uint16_t data;
             uint16_t and = (req[offset + 3] << 8) + req[offset + 4];
             uint16_t or = (req[offset + 5] << 8) + req[offset + 6];
 
+            rsp_length = compute_response_length_from_request(ctx, (uint8_t *) req);
+            if (rsp_length != req_length) {
+                /* Bad use of modbus_reply */
+                rsp_length = response_exception(ctx,
+                                                &sft,
+                                                MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                                                rsp,
+                                                FALSE,
+                                                "Invalid request length in modbus_reply "
+                                                "to mask write register (%d)\n",
+                                                req_length);
+                break;
+            }
+
+            data = mb_mapping->tab_registers[mapping_address];
             data = (data & and) | (or & (~and));
             mb_mapping->tab_registers[mapping_address] = data;
-            memcpy(rsp, req, req_length);
-            rsp_length = req_length;
+
+            rsp_length -= ctx->backend->checksum_length;
+            memcpy(rsp, req, rsp_length);
         }
-    }
-        break;
+    } break;
     case MODBUS_FC_WRITE_AND_READ_REGISTERS: {
         int nb = (req[offset + 3] << 8) + req[offset + 4];
         uint16_t address_write = (req[offset + 5] << 8) + req[offset + 6];
@@ -951,20 +1194,32 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
         int mapping_address = address - mb_mapping->start_registers;
         int mapping_address_write = address_write - mb_mapping->start_registers;
 
-        if (nb_write < 1 || MODBUS_MAX_WR_WRITE_REGISTERS < nb_write ||
-            nb < 1 || MODBUS_MAX_WR_READ_REGISTERS < nb ||
-            nb_write_bytes != nb_write * 2) {
+        if (nb_write < 1 || MODBUS_MAX_WR_WRITE_REGISTERS < nb_write || nb < 1 ||
+            MODBUS_MAX_WR_READ_REGISTERS < nb || nb_write_bytes != nb_write * 2) {
             rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, rsp, TRUE,
-                "Illegal nb of values (W%d, R%d) in write_and_read_registers (max W%d, R%d)\n",
-                nb_write, nb, MODBUS_MAX_WR_WRITE_REGISTERS, MODBUS_MAX_WR_READ_REGISTERS);
+                ctx,
+                &sft,
+                MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE,
+                rsp,
+                TRUE,
+                "Illegal nb of values (W%d, R%d) in write_and_read_registers (max W%d, "
+                "R%d)\n",
+                nb_write,
+                nb,
+                MODBUS_MAX_WR_WRITE_REGISTERS,
+                MODBUS_MAX_WR_READ_REGISTERS);
         } else if (mapping_address < 0 ||
                    (mapping_address + nb) > mb_mapping->nb_registers ||
                    mapping_address_write < 0 ||
                    (mapping_address_write + nb_write) > mb_mapping->nb_registers) {
             rsp_length = response_exception(
-                ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
-                "Illegal data read address 0x%0X or write address 0x%0X write_and_read_registers\n",
+                ctx,
+                &sft,
+                MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS,
+                rsp,
+                FALSE,
+                "Illegal data read address 0x%0X or write address 0x%0X "
+                "write_and_read_registers\n",
                 mapping_address < 0 ? address : address + nb,
                 mapping_address_write < 0 ? address_write : address_write + nb_write);
         } else {
@@ -974,8 +1229,8 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
 
             /* Write first.
                10 and 11 are the offset of the first values to write */
-            for (i = mapping_address_write, j = 10;
-                 i < mapping_address_write + nb_write; i++, j += 2) {
+            for (i = mapping_address_write, j = 10; i < mapping_address_write + nb_write;
+                 i++, j += 2) {
                 mb_mapping->tab_registers[i] =
                     (req[offset + j] << 8) + req[offset + j + 1];
             }
@@ -986,33 +1241,39 @@ int modbus_reply(modbus_t *ctx, const uint8_t *req,
                 rsp[rsp_length++] = mb_mapping->tab_registers[i] & 0xFF;
             }
         }
-    }
-        break;
+    } break;
 
     default:
-        rsp_length = response_exception(
-            ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_FUNCTION, rsp, TRUE,
-            "Unknown Modbus function code: 0x%0X\n", function);
+        rsp_length = response_exception(ctx,
+                                        &sft,
+                                        MODBUS_EXCEPTION_ILLEGAL_FUNCTION,
+                                        rsp,
+                                        TRUE,
+                                        "Unknown Modbus function code: 0x%0X\n",
+                                        function);
         break;
     }
 
-    /* Suppress any responses when the request was a broadcast */
-    return (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_RTU &&
-            slave == MODBUS_BROADCAST_ADDRESS) ? 0 : send_msg(ctx, rsp, rsp_length);
+    /* Suppress any responses in RTU when the request was a broadcast, excepted when
+     * quirk is enabled. */
+    if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_RTU &&
+        slave == MODBUS_BROADCAST_ADDRESS &&
+        !(ctx->quirks & MODBUS_QUIRK_REPLY_TO_BROADCAST)) {
+        return 0;
+    }
+    return send_msg(ctx, rsp, rsp_length);
 }
 
-int modbus_reply_exception(modbus_t *ctx, const uint8_t *req,
-                           unsigned int exception_code)
+int modbus_reply_exception(modbus_t *ctx, const uint8_t *req, unsigned int exception_code)
 {
-    int offset;
+    unsigned int offset;
     int slave;
     int function;
     uint8_t rsp[MAX_MESSAGE_LENGTH];
     int rsp_length;
-    int dummy_length = 99;
     sft_t sft;
 
-    if (ctx == NULL) {
+    if (ctx == NULL || req == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -1023,7 +1284,7 @@ int modbus_reply_exception(modbus_t *ctx, const uint8_t *req,
 
     sft.slave = slave;
     sft.function = function + 0x80;
-    sft.t_id = ctx->backend->prepare_response_tid(req, &dummy_length);
+    sft.t_id = ctx->backend->get_response_tid(req);
     rsp_length = ctx->backend->build_response_basis(&sft, rsp);
 
     /* Positive exception code */
@@ -1036,9 +1297,155 @@ int modbus_reply_exception(modbus_t *ctx, const uint8_t *req,
     }
 }
 
+/* Forward a request received on one context to another and relay the response back.
+   This function is useful to implement a Modbus gateway/proxy that bridges
+   two different backends (eg. TCP to RTU). */
+int modbus_proxy(modbus_t *frontend_ctx,
+                 modbus_t *backend_ctx,
+                 const uint8_t *req,
+                 int req_length)
+{
+    int rc;
+    int frontend_header_length;
+    int frontend_checksum_length;
+    int backend_header_length;
+    int backend_checksum_length;
+    int pdu_length;
+    uint8_t backend_req[MAX_MESSAGE_LENGTH];
+    int backend_req_length;
+    uint8_t backend_rsp[MAX_MESSAGE_LENGTH];
+    int backend_rsp_length;
+    uint8_t frontend_rsp[MAX_MESSAGE_LENGTH];
+    int frontend_rsp_length;
+    sft_t sft;
+
+    if (frontend_ctx == NULL || backend_ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (req == NULL || req_length < 1) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    frontend_header_length = frontend_ctx->backend->header_length;
+    frontend_checksum_length = frontend_ctx->backend->checksum_length;
+    backend_header_length = backend_ctx->backend->header_length;
+    backend_checksum_length = backend_ctx->backend->checksum_length;
+
+    /* Extract the PDU (slave + function + data) from the frontend request.
+       The PDU sits between the header and the checksum. */
+    pdu_length = req_length - frontend_header_length - frontend_checksum_length;
+    if (pdu_length < 1 || pdu_length > MODBUS_MAX_PDU_LENGTH + 1) {
+        errno = EMBBADDATA;
+        return -1;
+    }
+
+    /* Set the slave address on the backend context */
+    rc = modbus_set_slave(backend_ctx, req[frontend_header_length - 1]);
+    if (rc == -1) {
+        modbus_reply_exception(frontend_ctx, req, MODBUS_EXCEPTION_GATEWAY_PATH);
+        return -1;
+    }
+
+    /* Build a raw request for the backend from the PDU.
+       The raw request for modbus_send_raw_request is: slave + function + data
+       (ie. the PDU from the frontend request, starting at header_length - 1).
+       pdu_length is bounded above by the check on MODBUS_MAX_PDU_LENGTH, so
+       pdu_length + 1 always fits in backend_req[MAX_MESSAGE_LENGTH]. */
+    memcpy(backend_req, req + frontend_header_length - 1, pdu_length + 1);
+    backend_req_length = pdu_length + 1;
+
+    /* Keep the transaction ID of the frontend request to restore it in the
+       response sent to the frontend */
+    sft.slave = backend_req[0];
+    sft.function = backend_req[1];
+    sft.t_id = frontend_ctx->backend->get_response_tid(req);
+
+    /* Send the request to the backend device using raw request.
+       modbus_send_raw_request_tid wraps the PDU into the backend framing.
+       The backend request uses transaction ID 0 and the pre-check of the
+       confirmation below relies on it (check_sft.t_id) */
+    rc = modbus_send_raw_request_tid(
+        backend_ctx, backend_req, backend_req_length, 0);
+    if (rc == -1) {
+        modbus_reply_exception(frontend_ctx, req, MODBUS_EXCEPTION_GATEWAY_PATH);
+        return -1;
+    }
+
+    /* Receive the response from the backend */
+    backend_rsp_length = _modbus_receive_msg(backend_ctx, backend_rsp, MSG_CONFIRMATION);
+    if (backend_rsp_length == -1) {
+        if (errno == ETIMEDOUT)
+            modbus_reply_exception(
+                frontend_ctx, req, MODBUS_EXCEPTION_GATEWAY_TARGET);
+        else
+            modbus_reply_exception(
+                frontend_ctx, req, MODBUS_EXCEPTION_GATEWAY_PATH);
+        return -1;
+    }
+
+    /* Check the backend response integrity */
+    if (backend_ctx->backend->pre_check_confirmation) {
+        /* Build a minimal req for the pre_check (only header matters for TID/slave check).
+           We reuse the backend_req buffer which still holds our sent data. */
+        uint8_t check_req[MAX_MESSAGE_LENGTH];
+        int check_req_length;
+        sft_t check_sft;
+
+        check_sft.slave = sft.slave;
+        check_sft.function = sft.function;
+        check_sft.t_id = 0;
+        check_req_length = backend_ctx->backend->build_response_basis(&check_sft, check_req);
+        /* Append enough data so the length is valid */
+        if (backend_req_length > 2) {
+            memcpy(check_req + check_req_length, backend_req + 2, backend_req_length - 2);
+            check_req_length += backend_req_length - 2;
+        }
+
+        rc = backend_ctx->backend->pre_check_confirmation(
+            backend_ctx, check_req, backend_rsp, backend_rsp_length);
+        if (rc == -1) {
+            modbus_reply_exception(
+                frontend_ctx, req, MODBUS_EXCEPTION_GATEWAY_TARGET);
+            return -1;
+        }
+    }
+
+    /* Extract the PDU from the backend response and wrap it for the frontend.
+       Backend response layout: [header][function][data...][checksum] */
+    pdu_length =
+        backend_rsp_length - backend_header_length - backend_checksum_length;
+    if (pdu_length < 1) {
+        modbus_reply_exception(
+            frontend_ctx, req, MODBUS_EXCEPTION_GATEWAY_TARGET);
+        return -1;
+    }
+
+    /* Build the frontend response: use the original slave and function from the
+       backend response, and the transaction ID from the frontend request. */
+    sft.slave = backend_rsp[backend_header_length - 1];
+    sft.function = backend_rsp[backend_header_length];
+    /* sft.t_id was already set from the frontend request above */
+
+    frontend_rsp_length =
+        frontend_ctx->backend->build_response_basis(&sft, frontend_rsp);
+
+    /* Copy the remaining PDU data (everything after function code) */
+    if (pdu_length > 1) {
+        int data_length = pdu_length - 1;
+        memcpy(frontend_rsp + frontend_rsp_length,
+               backend_rsp + backend_header_length + 1,
+               data_length);
+        frontend_rsp_length += data_length;
+    }
+
+    return send_msg(frontend_ctx, frontend_rsp, frontend_rsp_length);
+}
+
 /* Reads IO status */
-static int read_io_status(modbus_t *ctx, int function,
-                          int addr, int nb, uint8_t *dest)
+static int read_io_status(modbus_t *ctx, int function, int addr, int nb, uint8_t *dest)
 {
     int rc;
     int req_length;
@@ -1050,10 +1457,11 @@ static int read_io_status(modbus_t *ctx, int function,
 
     rc = send_msg(ctx, req, req_length);
     if (rc > 0) {
-        int i, temp, bit;
+        int temp, bit;
         int pos = 0;
-        int offset;
-        int offset_end;
+        unsigned int offset;
+        unsigned int offset_end;
+        unsigned int i;
 
         rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
         if (rc == -1)
@@ -1073,7 +1481,6 @@ static int read_io_status(modbus_t *ctx, int function,
                 dest[pos++] = (temp & bit) ? TRUE : FALSE;
                 bit = bit << 1;
             }
-
         }
     }
 
@@ -1086,18 +1493,19 @@ int modbus_read_bits(modbus_t *ctx, int addr, int nb, uint8_t *dest)
 {
     int rc;
 
-    if (ctx == NULL) {
+    if (ctx == NULL || dest == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (nb > MODBUS_MAX_READ_BITS) {
+    if (nb < 1 || nb > MODBUS_MAX_READ_BITS) {
         if (ctx->debug) {
             fprintf(stderr,
                     "ERROR Too many bits requested (%d > %d)\n",
-                    nb, MODBUS_MAX_READ_BITS);
+                    nb,
+                    MODBUS_MAX_READ_BITS);
         }
-        errno = EMBMDATA;
+        errno = EMBXILVAL;
         return -1;
     }
 
@@ -1109,24 +1517,24 @@ int modbus_read_bits(modbus_t *ctx, int addr, int nb, uint8_t *dest)
         return nb;
 }
 
-
 /* Same as modbus_read_bits but reads the remote device input table */
 int modbus_read_input_bits(modbus_t *ctx, int addr, int nb, uint8_t *dest)
 {
     int rc;
 
-    if (ctx == NULL) {
+    if (ctx == NULL || dest == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (nb > MODBUS_MAX_READ_BITS) {
+    if (nb < 1 || nb > MODBUS_MAX_READ_BITS) {
         if (ctx->debug) {
             fprintf(stderr,
                     "ERROR Too many discrete inputs requested (%d > %d)\n",
-                    nb, MODBUS_MAX_READ_BITS);
+                    nb,
+                    MODBUS_MAX_READ_BITS);
         }
-        errno = EMBMDATA;
+        errno = EMBXILVAL;
         return -1;
     }
 
@@ -1139,8 +1547,7 @@ int modbus_read_input_bits(modbus_t *ctx, int addr, int nb, uint8_t *dest)
 }
 
 /* Reads the data from a remote device and put that data into an array */
-static int read_registers(modbus_t *ctx, int function, int addr, int nb,
-                          uint16_t *dest)
+static int read_registers(modbus_t *ctx, int function, int addr, int nb, uint16_t *dest)
 {
     int rc;
     int req_length;
@@ -1151,9 +1558,10 @@ static int read_registers(modbus_t *ctx, int function, int addr, int nb,
         if (ctx->debug) {
             fprintf(stderr,
                     "ERROR Too many registers requested (%d > %d)\n",
-                    nb, MODBUS_MAX_READ_REGISTERS);
+                    nb,
+                    MODBUS_MAX_READ_REGISTERS);
         }
-        errno = EMBMDATA;
+        errno = EMBXILVAL;
         return -1;
     }
 
@@ -1161,7 +1569,7 @@ static int read_registers(modbus_t *ctx, int function, int addr, int nb,
 
     rc = send_msg(ctx, req, req_length);
     if (rc > 0) {
-        int offset;
+        unsigned int offset;
         int i;
 
         rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
@@ -1176,8 +1584,7 @@ static int read_registers(modbus_t *ctx, int function, int addr, int nb,
 
         for (i = 0; i < rc; i++) {
             /* shift reg hi_byte to temp OR with lo_byte */
-            dest[i] = (rsp[offset + 2 + (i << 1)] << 8) |
-                rsp[offset + 3 + (i << 1)];
+            dest[i] = (rsp[offset + 2 + (i << 1)] << 8) | rsp[offset + 3 + (i << 1)];
         }
     }
 
@@ -1190,47 +1597,48 @@ int modbus_read_registers(modbus_t *ctx, int addr, int nb, uint16_t *dest)
 {
     int status;
 
-    if (ctx == NULL) {
+    if (ctx == NULL || dest == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (nb > MODBUS_MAX_READ_REGISTERS) {
+    if (nb < 1 || nb > MODBUS_MAX_READ_REGISTERS) {
         if (ctx->debug) {
             fprintf(stderr,
                     "ERROR Too many registers requested (%d > %d)\n",
-                    nb, MODBUS_MAX_READ_REGISTERS);
+                    nb,
+                    MODBUS_MAX_READ_REGISTERS);
         }
-        errno = EMBMDATA;
+        errno = EMBXILVAL;
         return -1;
     }
 
-    status = read_registers(ctx, MODBUS_FC_READ_HOLDING_REGISTERS,
-                            addr, nb, dest);
+    status = read_registers(ctx, MODBUS_FC_READ_HOLDING_REGISTERS, addr, nb, dest);
     return status;
 }
 
 /* Reads the input registers of remote device and put the data into an array */
-int modbus_read_input_registers(modbus_t *ctx, int addr, int nb,
-                                uint16_t *dest)
+int modbus_read_input_registers(modbus_t *ctx, int addr, int nb, uint16_t *dest)
 {
     int status;
 
-    if (ctx == NULL) {
+    if (ctx == NULL || dest == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (nb > MODBUS_MAX_READ_REGISTERS) {
-        fprintf(stderr,
-                "ERROR Too many input registers requested (%d > %d)\n",
-                nb, MODBUS_MAX_READ_REGISTERS);
-        errno = EMBMDATA;
+    if (nb < 1 || nb > MODBUS_MAX_READ_REGISTERS) {
+        if (ctx->debug) {
+            fprintf(stderr,
+                    "ERROR Too many input registers requested (%d > %d)\n",
+                    nb,
+                    MODBUS_MAX_READ_REGISTERS);
+        }
+        errno = EMBXILVAL;
         return -1;
     }
 
-    status = read_registers(ctx, MODBUS_FC_READ_INPUT_REGISTERS,
-                            addr, nb, dest);
+    status = read_registers(ctx, MODBUS_FC_READ_INPUT_REGISTERS, addr, nb, dest);
 
     return status;
 }
@@ -1273,8 +1681,7 @@ int modbus_write_bit(modbus_t *ctx, int addr, int status)
         return -1;
     }
 
-    return write_single(ctx, MODBUS_FC_WRITE_SINGLE_COIL, addr,
-                        status ? 0xFF00 : 0);
+    return write_single(ctx, MODBUS_FC_WRITE_SINGLE_COIL, addr, status ? 0xFF00 : 0);
 }
 
 /* Writes a value in one register of the remote device */
@@ -1299,23 +1706,24 @@ int modbus_write_bits(modbus_t *ctx, int addr, int nb, const uint8_t *src)
     int pos = 0;
     uint8_t req[MAX_MESSAGE_LENGTH];
 
-    if (ctx == NULL) {
+    if (ctx == NULL || src == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (nb > MODBUS_MAX_WRITE_BITS) {
+    if (nb < 1 || nb > MODBUS_MAX_WRITE_BITS) {
         if (ctx->debug) {
-            fprintf(stderr, "ERROR Writing too many bits (%d > %d)\n",
-                    nb, MODBUS_MAX_WRITE_BITS);
+            fprintf(stderr,
+                    "ERROR Writing too many bits (%d > %d)\n",
+                    nb,
+                    MODBUS_MAX_WRITE_BITS);
         }
-        errno = EMBMDATA;
+        errno = EMBXILVAL;
         return -1;
     }
 
-    req_length = ctx->backend->build_request_basis(ctx,
-                                                   MODBUS_FC_WRITE_MULTIPLE_COILS,
-                                                   addr, nb, req);
+    req_length = ctx->backend->build_request_basis(
+        ctx, MODBUS_FC_WRITE_MULTIPLE_COILS, addr, nb, req);
     byte_count = (nb / 8) + ((nb % 8) ? 1 : 0);
     req[req_length++] = byte_count;
 
@@ -1329,7 +1737,7 @@ int modbus_write_bits(modbus_t *ctx, int addr, int nb, const uint8_t *src)
             if (src[pos++])
                 req[req_length] |= bit;
             else
-                req[req_length] &=~ bit;
+                req[req_length] &= ~bit;
 
             bit = bit << 1;
         }
@@ -1347,7 +1755,6 @@ int modbus_write_bits(modbus_t *ctx, int addr, int nb, const uint8_t *src)
         rc = check_confirmation(ctx, req, rsp, rc);
     }
 
-
     return rc;
 }
 
@@ -1360,24 +1767,24 @@ int modbus_write_registers(modbus_t *ctx, int addr, int nb, const uint16_t *src)
     int byte_count;
     uint8_t req[MAX_MESSAGE_LENGTH];
 
-    if (ctx == NULL) {
+    if (ctx == NULL || src == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (nb > MODBUS_MAX_WRITE_REGISTERS) {
+    if (nb < 1 || nb > MODBUS_MAX_WRITE_REGISTERS) {
         if (ctx->debug) {
             fprintf(stderr,
                     "ERROR Trying to write to too many registers (%d > %d)\n",
-                    nb, MODBUS_MAX_WRITE_REGISTERS);
+                    nb,
+                    MODBUS_MAX_WRITE_REGISTERS);
         }
-        errno = EMBMDATA;
+        errno = EMBXILVAL;
         return -1;
     }
 
-    req_length = ctx->backend->build_request_basis(ctx,
-                                                   MODBUS_FC_WRITE_MULTIPLE_REGISTERS,
-                                                   addr, nb, req);
+    req_length = ctx->backend->build_request_basis(
+        ctx, MODBUS_FC_WRITE_MULTIPLE_REGISTERS, addr, nb, req);
     byte_count = nb * 2;
     req[req_length++] = byte_count;
 
@@ -1400,18 +1807,25 @@ int modbus_write_registers(modbus_t *ctx, int addr, int nb, const uint16_t *src)
     return rc;
 }
 
-int modbus_mask_write_register(modbus_t *ctx, int addr, uint16_t and_mask, uint16_t or_mask)
+int modbus_mask_write_register(modbus_t *ctx,
+                               int addr,
+                               uint16_t and_mask,
+                               uint16_t or_mask)
 {
     int rc;
     int req_length;
     /* The request length can not exceed _MIN_REQ_LENGTH - 2 and 4 bytes to
-     * store the masks. The ugly subtraction is there to remove the 'nb' value
+     * store the masks. The ugly substraction is there to remove the 'nb' value
      * (2 bytes) which is not used. */
     uint8_t req[_MIN_REQ_LENGTH + 2];
 
-    req_length = ctx->backend->build_request_basis(ctx,
-                                                   MODBUS_FC_MASK_WRITE_REGISTER,
-                                                   addr, 0, req);
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    req_length = ctx->backend->build_request_basis(
+        ctx, MODBUS_FC_MASK_WRITE_REGISTER, addr, 0, req);
 
     /* HACKISH, count is not used */
     req_length -= 2;
@@ -1439,9 +1853,11 @@ int modbus_mask_write_register(modbus_t *ctx, int addr, uint16_t and_mask, uint1
 /* Write multiple registers from src array to remote device and read multiple
    registers from remote device to dest array. */
 int modbus_write_and_read_registers(modbus_t *ctx,
-                                    int write_addr, int write_nb,
+                                    int write_addr,
+                                    int write_nb,
                                     const uint16_t *src,
-                                    int read_addr, int read_nb,
+                                    int read_addr,
+                                    int read_nb,
                                     uint16_t *dest)
 
 {
@@ -1452,7 +1868,7 @@ int modbus_write_and_read_registers(modbus_t *ctx,
     uint8_t req[MAX_MESSAGE_LENGTH];
     uint8_t rsp[MAX_MESSAGE_LENGTH];
 
-    if (ctx == NULL) {
+    if (ctx == NULL || src == NULL || dest == NULL || write_nb < 1 || read_nb < 1) {
         errno = EINVAL;
         return -1;
     }
@@ -1461,9 +1877,10 @@ int modbus_write_and_read_registers(modbus_t *ctx,
         if (ctx->debug) {
             fprintf(stderr,
                     "ERROR Too many registers to write (%d > %d)\n",
-                    write_nb, MODBUS_MAX_WR_WRITE_REGISTERS);
+                    write_nb,
+                    MODBUS_MAX_WR_WRITE_REGISTERS);
         }
-        errno = EMBMDATA;
+        errno = EMBXILVAL;
         return -1;
     }
 
@@ -1471,14 +1888,14 @@ int modbus_write_and_read_registers(modbus_t *ctx,
         if (ctx->debug) {
             fprintf(stderr,
                     "ERROR Too many registers requested (%d > %d)\n",
-                    read_nb, MODBUS_MAX_WR_READ_REGISTERS);
+                    read_nb,
+                    MODBUS_MAX_WR_READ_REGISTERS);
         }
-        errno = EMBMDATA;
+        errno = EMBXILVAL;
         return -1;
     }
-    req_length = ctx->backend->build_request_basis(ctx,
-                                                   MODBUS_FC_WRITE_AND_READ_REGISTERS,
-                                                   read_addr, read_nb, req);
+    req_length = ctx->backend->build_request_basis(
+        ctx, MODBUS_FC_WRITE_AND_READ_REGISTERS, read_addr, read_nb, req);
 
     req[req_length++] = write_addr >> 8;
     req[req_length++] = write_addr & 0x00ff;
@@ -1494,7 +1911,7 @@ int modbus_write_and_read_registers(modbus_t *ctx,
 
     rc = send_msg(ctx, req, req_length);
     if (rc > 0) {
-        int offset;
+        unsigned int offset;
 
         rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
         if (rc == -1)
@@ -1507,8 +1924,7 @@ int modbus_write_and_read_registers(modbus_t *ctx,
         offset = ctx->backend->header_length;
         for (i = 0; i < rc; i++) {
             /* shift reg hi_byte to temp OR with lo_byte */
-            dest[i] = (rsp[offset + 2 + (i << 1)] << 8) |
-                rsp[offset + 3 + (i << 1)];
+            dest[i] = (rsp[offset + 2 + (i << 1)] << 8) | rsp[offset + 3 + (i << 1)];
         }
     }
 
@@ -1523,13 +1939,13 @@ int modbus_report_slave_id(modbus_t *ctx, int max_dest, uint8_t *dest)
     int req_length;
     uint8_t req[_MIN_REQ_LENGTH];
 
-    if (ctx == NULL || max_dest <= 0) {
+    if (ctx == NULL || dest == NULL || max_dest <= 0) {
         errno = EINVAL;
         return -1;
     }
 
-    req_length = ctx->backend->build_request_basis(ctx, MODBUS_FC_REPORT_SLAVE_ID,
-                                                   0, 0, req);
+    req_length =
+        ctx->backend->build_request_basis(ctx, MODBUS_FC_REPORT_SLAVE_ID, 0, 0, req);
 
     /* HACKISH, addr and count are not used */
     req_length -= 4;
@@ -1537,7 +1953,7 @@ int modbus_report_slave_id(modbus_t *ctx, int max_dest, uint8_t *dest)
     rc = send_msg(ctx, req, req_length);
     if (rc > 0) {
         int i;
-        int offset;
+        unsigned int offset;
         uint8_t rsp[MAX_MESSAGE_LENGTH];
 
         rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
@@ -1552,7 +1968,7 @@ int modbus_report_slave_id(modbus_t *ctx, int max_dest, uint8_t *dest)
 
         /* Byte count, slave id, run indicator status and
            additional data. Truncate copy to max_dest. */
-        for (i=0; i < rc && i < max_dest; i++) {
+        for (i = 0; i < rc && i < max_dest; i++) {
             dest[i] = rsp[offset + i];
         }
     }
@@ -1568,6 +1984,7 @@ void _modbus_init_common(modbus_t *ctx)
 
     ctx->debug = FALSE;
     ctx->error_recovery = MODBUS_ERROR_RECOVERY_NONE;
+    ctx->quirks = MODBUS_QUIRK_NONE;
 
     ctx->response_timeout.tv_sec = 0;
     ctx->response_timeout.tv_usec = _RESPONSE_TIMEOUT;
@@ -1600,8 +2017,7 @@ int modbus_get_slave(modbus_t *ctx)
     return ctx->slave;
 }
 
-int modbus_set_error_recovery(modbus_t *ctx,
-                              modbus_error_recovery_mode error_recovery)
+int modbus_set_error_recovery(modbus_t *ctx, modbus_error_recovery_mode error_recovery)
 {
     if (ctx == NULL) {
         errno = EINVAL;
@@ -1613,6 +2029,7 @@ int modbus_set_error_recovery(modbus_t *ctx,
     return 0;
 }
 
+// FIXME Doesn't work under Windows RTU
 int modbus_set_socket(modbus_t *ctx, int s)
 {
     if (ctx == NULL) {
@@ -1637,7 +2054,7 @@ int modbus_get_socket(modbus_t *ctx)
 /* Get the timeout interval used to wait for a response */
 int modbus_get_response_timeout(modbus_t *ctx, uint32_t *to_sec, uint32_t *to_usec)
 {
-    if (ctx == NULL) {
+    if (ctx == NULL || to_sec == NULL || to_usec == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -1649,8 +2066,7 @@ int modbus_get_response_timeout(modbus_t *ctx, uint32_t *to_sec, uint32_t *to_us
 
 int modbus_set_response_timeout(modbus_t *ctx, uint32_t to_sec, uint32_t to_usec)
 {
-    if (ctx == NULL ||
-        (to_sec == 0 && to_usec == 0) || to_usec > 999999) {
+    if (ctx == NULL || (to_sec == 0 && to_usec == 0) || to_usec > 999999) {
         errno = EINVAL;
         return -1;
     }
@@ -1663,7 +2079,7 @@ int modbus_set_response_timeout(modbus_t *ctx, uint32_t to_sec, uint32_t to_usec
 /* Get the timeout interval between two consecutive bytes of a message */
 int modbus_get_byte_timeout(modbus_t *ctx, uint32_t *to_sec, uint32_t *to_usec)
 {
-    if (ctx == NULL) {
+    if (ctx == NULL || to_sec == NULL || to_usec == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -1686,10 +2102,11 @@ int modbus_set_byte_timeout(modbus_t *ctx, uint32_t to_sec, uint32_t to_usec)
     return 0;
 }
 
-/* Get the timeout interval used by the server to wait for an indication from a client */
+/* Get the timeout interval used by the server to wait for an indication from a client
+ */
 int modbus_get_indication_timeout(modbus_t *ctx, uint32_t *to_sec, uint32_t *to_usec)
 {
-    if (ctx == NULL) {
+    if (ctx == NULL || to_sec == NULL || to_usec == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -1720,6 +2137,30 @@ int modbus_get_header_length(modbus_t *ctx)
     }
 
     return ctx->backend->header_length;
+}
+
+int modbus_enable_quirks(modbus_t *ctx, unsigned int quirks_mask)
+{
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Enable quirks that have a true value at their index in the mask */
+    ctx->quirks |= quirks_mask;
+    return 0;
+}
+
+int modbus_disable_quirks(modbus_t *ctx, unsigned int quirks_mask)
+{
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Disable quirks that have a true value at ther index in the mask */
+    ctx->quirks &= ~quirks_mask;
+    return 0;
 }
 
 int modbus_connect(modbus_t *ctx)
@@ -1765,15 +2206,27 @@ int modbus_set_debug(modbus_t *ctx, int flag)
    The modbus_mapping_new_start_address() function shall return the new allocated
    structure if successful. Otherwise it shall return NULL and set errno to
    ENOMEM. */
-modbus_mapping_t* modbus_mapping_new_start_address(
-    unsigned int start_bits, unsigned int nb_bits,
-    unsigned int start_input_bits, unsigned int nb_input_bits,
-    unsigned int start_registers, unsigned int nb_registers,
-    unsigned int start_input_registers, unsigned int nb_input_registers)
+modbus_mapping_t *modbus_mapping_new_start_address(unsigned int start_bits,
+                                                   unsigned int nb_bits,
+                                                   unsigned int start_input_bits,
+                                                   unsigned int nb_input_bits,
+                                                   unsigned int start_registers,
+                                                   unsigned int nb_registers,
+                                                   unsigned int start_input_registers,
+                                                   unsigned int nb_input_registers)
 {
     modbus_mapping_t *mb_mapping;
 
-    mb_mapping = (modbus_mapping_t *)malloc(sizeof(modbus_mapping_t));
+    /* Reject dimensions larger than the addressable space to avoid excessively
+       large allocations driven by untrusted configuration. */
+    if (nb_bits > MODBUS_MAX_TABLE_SIZE || nb_input_bits > MODBUS_MAX_TABLE_SIZE ||
+        nb_registers > MODBUS_MAX_TABLE_SIZE ||
+        nb_input_registers > MODBUS_MAX_TABLE_SIZE) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    mb_mapping = (modbus_mapping_t *) malloc(sizeof(modbus_mapping_t));
     if (mb_mapping == NULL) {
         return NULL;
     }
@@ -1784,9 +2237,7 @@ modbus_mapping_t* modbus_mapping_new_start_address(
     if (nb_bits == 0) {
         mb_mapping->tab_bits = NULL;
     } else {
-        /* Negative number raises a POSIX error */
-        mb_mapping->tab_bits =
-            (uint8_t *) malloc(nb_bits * sizeof(uint8_t));
+        mb_mapping->tab_bits = (uint8_t *) malloc(nb_bits * sizeof(uint8_t));
         if (mb_mapping->tab_bits == NULL) {
             free(mb_mapping);
             return NULL;
@@ -1800,8 +2251,7 @@ modbus_mapping_t* modbus_mapping_new_start_address(
     if (nb_input_bits == 0) {
         mb_mapping->tab_input_bits = NULL;
     } else {
-        mb_mapping->tab_input_bits =
-            (uint8_t *) malloc(nb_input_bits * sizeof(uint8_t));
+        mb_mapping->tab_input_bits = (uint8_t *) malloc(nb_input_bits * sizeof(uint8_t));
         if (mb_mapping->tab_input_bits == NULL) {
             free(mb_mapping->tab_bits);
             free(mb_mapping);
@@ -1816,8 +2266,7 @@ modbus_mapping_t* modbus_mapping_new_start_address(
     if (nb_registers == 0) {
         mb_mapping->tab_registers = NULL;
     } else {
-        mb_mapping->tab_registers =
-            (uint16_t *) malloc(nb_registers * sizeof(uint16_t));
+        mb_mapping->tab_registers = (uint16_t *) malloc(nb_registers * sizeof(uint16_t));
         if (mb_mapping->tab_registers == NULL) {
             free(mb_mapping->tab_input_bits);
             free(mb_mapping->tab_bits);
@@ -1842,16 +2291,25 @@ modbus_mapping_t* modbus_mapping_new_start_address(
             free(mb_mapping);
             return NULL;
         }
-        memset(mb_mapping->tab_input_registers, 0,
-               nb_input_registers * sizeof(uint16_t));
+        memset(mb_mapping->tab_input_registers, 0, nb_input_registers * sizeof(uint16_t));
     }
 
     return mb_mapping;
 }
 
-modbus_mapping_t* modbus_mapping_new(int nb_bits, int nb_input_bits,
-                                     int nb_registers, int nb_input_registers)
+modbus_mapping_t *modbus_mapping_new(int nb_bits,
+                                     int nb_input_bits,
+                                     int nb_registers,
+                                     int nb_input_registers)
 {
+    /* Reject negative counts: they would otherwise be converted to very large
+       unsigned dimensions and drive huge allocations. */
+    if (nb_bits < 0 || nb_input_bits < 0 || nb_registers < 0 ||
+        nb_input_registers < 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+
     return modbus_mapping_new_start_address(
         0, nb_bits, 0, nb_input_bits, 0, nb_registers, 0, nb_input_registers);
 }
