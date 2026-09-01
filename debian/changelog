@@ -1,3 +1,9 @@
+libmodbus (3.2.0-1+wb100) unstable; urgency=medium
+
+  * Disable RTU address filtering
+
+ -- Ilya Titov <ilya.titov@wirenboard.com>  Tue, 01 Sep 2026 11:27:14 +0300
+
 libmodbus (3.2.0-1) unstable; urgency=medium
 
   * Team upload
