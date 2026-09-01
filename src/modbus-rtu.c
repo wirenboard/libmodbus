@@ -299,12 +299,12 @@ static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
     }
     return 0;
 }
-#endif
 
 static uint64_t _timeval_to_usec(const struct timeval *tv)
 {
     return (uint64_t) tv->tv_sec * 1000000 + (uint64_t) tv->tv_usec;
 }
+#endif
 
 static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_length)
 {
