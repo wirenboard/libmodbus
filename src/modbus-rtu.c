@@ -263,17 +263,68 @@ static void _modbus_rtu_ioctl_rts(modbus_t *ctx, int on)
 }
 #endif
 
+#ifndef _WIN32
+/* Sets up stopbits for RTU-communications serial device */
+static int _modbus_rtu_set_stopbits_onthefly(modbus_t *ctx, int stop_bit)
+{
+#ifdef HAVE_STRUCT_TERMIOS2
+    struct termios2 tios;
+
+    if (ioctl(ctx->s, TCGETS2, &tios) < 0) {
+        return -1;
+    }
+#else
+    struct termios tios;
+
+    if (tcgetattr(ctx->s, &tios) < 0) {
+        return -1;
+    }
+#endif
+
+    /* Stop bit (1 or 2) */
+    if (stop_bit == 1)
+        tios.c_cflag &= ~CSTOPB;
+    else /* 2 */
+        tios.c_cflag |= CSTOPB;
+
+    /* Applying settings after all queued output has been written */
+#ifdef HAVE_STRUCT_TERMIOS2
+    if (ioctl(ctx->s, TCSETSW2, &tios) < 0) {
+#else
+    if (tcsetattr(ctx->s, TCSADRAIN, &tios) < 0) {
+#endif
+        close(ctx->s);
+        ctx->s = -1;
+        return -1;
+    }
+    return 0;
+}
+
+static uint64_t _timeval_to_usec(const struct timeval *tv)
+{
+    return (uint64_t) tv->tv_sec * 1000000 + (uint64_t) tv->tv_usec;
+}
+#endif
+
 static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_length)
 {
-#if defined(_WIN32)
     modbus_rtu_t *ctx_rtu = ctx->backend_data;
+#if defined(_WIN32)
     DWORD n_bytes = 0;
     return (WriteFile(ctx_rtu->w_ser.fd, req, req_length, &n_bytes, NULL))
                ? (ssize_t) n_bytes
                : -1;
 #else
+
+    /* Setting stopbits for transmitting */
+    if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
+        if (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit) != 0) {
+            return -1;
+        }
+    }
+
+    ssize_t ret;
 #if HAVE_DECL_TIOCM_RTS
-    modbus_rtu_t *ctx_rtu = ctx->backend_data;
     if (ctx_rtu->rts != MODBUS_RTU_RTS_NONE) {
         ssize_t size;
 
@@ -306,13 +357,35 @@ static ssize_t _modbus_rtu_send(modbus_t *ctx, const uint8_t *req, int req_lengt
         }
         ctx_rtu->set_rts(ctx, ctx_rtu->rts != MODBUS_RTU_RTS_UP);
 
-        return size;
+        ret = size;
     } else {
 #endif
-        return write(ctx->s, req, req_length);
+        ret = write(ctx->s, req, req_length);
 #if HAVE_DECL_TIOCM_RTS
     }
 #endif
+
+    /* Setting stopbits for receiving: wait until the request has left the
+       output buffer, otherwise the new setting would apply to its tail.
+       tcdrain() alone is not enough here: it returns before the last byte has
+       actually left the line, and switching the stop bits that early corrupts
+       the request. */
+    if (ctx_rtu->stop_bit != ctx_rtu->stop_bit_receive) {
+        int fd_buffered = 1;
+        struct timeval start_ts, now;
+        uint64_t timeout = _timeval_to_usec(&ctx->response_timeout);
+
+        gettimeofday(&start_ts, NULL);
+        gettimeofday(&now, NULL);
+        while ((fd_buffered > 0) && (_timeval_to_usec(&now) - _timeval_to_usec(&start_ts) < timeout)) {
+            usleep(100000);
+            ioctl(ctx->s, TIOCOUTQ, &fd_buffered);
+            gettimeofday(&now, NULL);
+        }
+        tcdrain(ctx->s);
+        ret = (_modbus_rtu_set_stopbits_onthefly(ctx, ctx_rtu->stop_bit_receive) == 0) ? ret : -1;
+    }
+    return ret;
 #endif
 }
 
@@ -410,6 +483,7 @@ static int _modbus_rtu_check_integrity(modbus_t *ctx, uint8_t *msg, const int ms
 
     return msg_length;
 }
+
 
 /* Sets up a serial port for RTU communications */
 #if defined(_WIN32)
@@ -1372,6 +1446,7 @@ modbus_new_rtu(const char *device, int baud, char parity, int data_bit, int stop
     }
     ctx_rtu->data_bit = data_bit;
     ctx_rtu->stop_bit = stop_bit;
+    ctx_rtu->stop_bit_receive = stop_bit;  // default is equal to sb-to-send
 
 #if HAVE_DECL_TIOCSRS485
     /* The RS232 mode has been set by default */
@@ -1397,3 +1472,29 @@ modbus_new_rtu(const char *device, int baud, char parity, int data_bit, int stop
 
     return ctx;
 }
+
+#ifndef _WIN32
+modbus_t* modbus_new_rtu_different_stopbits(const char *device,
+                         int baud, char parity, int data_bit,
+                         int stop_bit, int stop_bit_receive)
+{
+    modbus_t *ctx;
+    modbus_rtu_t *ctx_rtu;
+
+    /* Check stop_bit_receive argument, modbus_new_rtu checks the rest */
+    if (stop_bit_receive != 1 && stop_bit_receive != 2) {
+        fprintf(stderr, "The number of stop bits must be 1 or 2\n");
+        errno = EINVAL;
+        return NULL;
+    }
+
+    ctx = modbus_new_rtu(device, baud, parity, data_bit, stop_bit);
+    if (ctx == NULL) {
+        return NULL;
+    }
+
+    ctx_rtu = (modbus_rtu_t *)ctx->backend_data;
+    ctx_rtu->stop_bit_receive = stop_bit_receive;
+    return ctx;
+}
+#endif
