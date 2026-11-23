@@ -22,6 +22,14 @@ typedef int ssize_t;
 
 #include "modbus.h"
 
+/* POSIX fd_set is a bitmask indexed by descriptor, so FD_SET() overflows at FD_SETSIZE;
+ * Windows fd_set is a counted array of SOCKET handles of any value. */
+#if defined(_WIN32)
+#define MODBUS_FD_OUT_OF_RANGE(fd) (0)
+#else
+#define MODBUS_FD_OUT_OF_RANGE(fd) ((fd) >= FD_SETSIZE)
+#endif
+
 MODBUS_BEGIN_DECLS
 
 /* It's not really the minimal length (the real one is report slave ID
